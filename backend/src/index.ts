@@ -139,7 +139,7 @@ app.get('/api/health', (_req: unknown, res: any) => res.json({ status: 'ok' }));
 // ─── DB-backed repositories ───────────────────────────────────────────────────
 
 import { createIngestRouter } from './api/ingestRouter';
-import { createProjectDashboardRouter } from './api/projectDashboardRouter';
+import { createProjectDashboardRouter, createProjectErrorUpsertRouter } from './api/projectDashboardRouter';
 import { createLogsRouterSync } from './api/logsRouter';
 import { createBreaksRouterSync } from './api/breaksRouter';
 import { createDashboardRouterSync } from './api/dashboardRouter';
@@ -450,6 +450,8 @@ app.use('/api/ingest', createIngestRouter(logPipeline, errorAggregator, parseErr
 app.use('/api/dashboard', createProjectDashboardRouter(pool));
 // Breaks grouped endpoint (no auth)
 app.use('/api/breaks', createProjectDashboardRouter(pool));
+// Per-project error upsert (no auth — called by project services)
+app.use('/api/projects', createProjectErrorUpsertRouter(pool));
 
 // GET /api/projects?category=... — list projects from DB
 app.get('/api/projects', async (req: any, res: any) => {
