@@ -34,11 +34,11 @@ async function getProjectTables(pool: Pool): Promise<string[]> {
 
 /**
  * Builds a UNION ALL query across all project tables selecting
- * project_name, file_name, error, timestamp — only rows where error IS NOT NULL.
+ * project_name, file_name, error, timestamp — only active (non-resolved) errors.
  */
 function buildErrorUnion(tables: string[], extraWhere = ''): string {
   const parts = tables.map(
-    (t) => `SELECT project_name, file_name, error, timestamp FROM "${t}" WHERE error IS NOT NULL AND error <> ''${extraWhere}`,
+    (t) => `SELECT project_name, file_name, error, timestamp FROM "${t}" WHERE error IS NOT NULL AND error <> '' AND error_status IN ('open', 'reopened')${extraWhere}`,
   );
   return parts.join('\n UNION ALL\n');
 }
@@ -89,7 +89,7 @@ export function createProjectDashboardRouter(pool: Pool) {
       if (tables.length === 0) return res.json({ projects: [] });
 
       const parts = tables.map(
-        (t) => `SELECT project_name, COUNT(*) AS cnt FROM "${t}" WHERE error IS NOT NULL AND error <> '' GROUP BY project_name`,
+        (t) => `SELECT project_name, COUNT(*) AS cnt FROM "${t}" WHERE error IS NOT NULL AND error <> '' AND error_status IN ('open', 'reopened') GROUP BY project_name`,
       );
       const union = parts.join('\n UNION ALL\n');
 
@@ -186,9 +186,9 @@ export function createProjectDashboardRouter(pool: Pool) {
       if (from) dateWhere += ` AND timestamp >= '${from.replace(/'/g, "''")}'`;
       if (to)   dateWhere += ` AND timestamp <= '${to.replace(/'/g, "''")}'`;
 
-      // UNION ALL across all tables — only rows with errors
+      // UNION ALL across all tables — only active (non-resolved) errors
       const unionParts = tables.map(
-        (t) => `SELECT project_name, error, error_hash, timestamp FROM "${t}" WHERE error IS NOT NULL AND error <> ''${dateWhere}`,
+        (t) => `SELECT project_name, error, error_hash, timestamp FROM "${t}" WHERE error IS NOT NULL AND error <> '' AND error_status IN ('open', 'reopened')${dateWhere}`,
       );
       const union = unionParts.join('\nUNION ALL\n');
 

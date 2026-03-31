@@ -487,7 +487,8 @@ app.get('/api/projects/:name/logs', async (req: any, res: any) => {
     // Fetch all rows ordered by timestamp desc
     const { rows: logs } = await pool.query(
       `SELECT file_name, timestamp, success_count, failure_count, error,
-              llm_usage, input_tokens, output_tokens, calculated_cost, word_count, file_type
+              llm_usage, input_tokens, output_tokens, calculated_cost, word_count, file_type,
+              error_status, resolved_at, reopened_at
        FROM "${tableName}"
        ORDER BY timestamp DESC
        LIMIT 500`,
@@ -496,16 +497,23 @@ app.get('/api/projects/:name/logs', async (req: any, res: any) => {
     const total = logs.length;
     const filesProcessed = total;
     const success = logs.filter((r: any) => !r.error || r.error === '').length;
-    const failure = logs.filter((r: any) => r.error && r.error !== '').length;
+    const failure = logs.filter((r: any) => r.error && r.error !== '' && r.error_status !== 'resolved').length;
 
     const rawCost = logs.reduce((sum: number, r: any) => sum + (parseFloat(r.calculated_cost) || 0), 0);
     const totalCost = rawCost > 0 ? `$${rawCost.toFixed(4)}` : null;
 
     const errors = logs
-      .filter((r: any) => r.error && r.error !== '')
+      .filter((r: any) => r.error && r.error !== '' && (r.error_status === 'open' || r.error_status === 'reopened'))
       .map((r: any) => ({ timestamp: r.timestamp, message: r.error }));
 
-    res.json({ exists: true, tableName, total, filesProcessed, success, failure, totalCost, errors, logs });
+    // Filter resolved rows out of the logs returned to the UI
+    const visibleLogs = logs.map((r: any) => ({
+      ...r,
+      // treat resolved errors as no-error for display purposes
+      error: (r.error_status === 'resolved') ? null : r.error,
+    }));
+
+    res.json({ exists: true, tableName, total, filesProcessed, success, failure, totalCost, errors, logs: visibleLogs });
   } catch (err) {
     console.error('[Projects] logs error:', err);
     res.status(500).json({ error: 'Internal server error' });
