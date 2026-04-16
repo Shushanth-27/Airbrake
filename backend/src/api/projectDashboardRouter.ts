@@ -44,7 +44,7 @@ async function getProjectTables(pool: Pool): Promise<string[]> {
  */
 function buildErrorUnion(tables: string[], extraWhere = ''): string {
   const parts = tables.map(
-    (t) => `SELECT project_name, file_name, error, timestamp, reopened_at FROM "${t}" WHERE error IS NOT NULL AND error <> '' AND error_status IN ('open', 'reopened')${extraWhere}`,
+    (t) => `SELECT project_name, file_name, error, error_detail, timestamp, reopened_at FROM "${t}" WHERE error IS NOT NULL AND error <> '' AND error_status IN ('open', 'reopened')${extraWhere}`,
   );
   return parts.join('\n UNION ALL\n');
 }
@@ -128,7 +128,7 @@ export function createProjectDashboardRouter(pool: Pool) {
       const union = buildErrorUnion(tables, todayWhere);
 
       const { rows } = await pool.query(`
-        SELECT project_name AS project, file_name, error, COALESCE(reopened_at, timestamp) AS timestamp
+        SELECT project_name AS project, file_name, error, error_detail, COALESCE(reopened_at, timestamp) AS timestamp
         FROM (${union}) AS combined
         ORDER BY timestamp DESC
       `);
@@ -164,7 +164,7 @@ export function createProjectDashboardRouter(pool: Pool) {
       const union = buildErrorUnion(tables, extraWhere);
 
       const { rows } = await pool.query(`
-        SELECT project_name AS project, file_name, error, timestamp
+        SELECT project_name AS project, file_name, error, error_detail, timestamp
         FROM (${union}) AS combined
         ORDER BY timestamp DESC
         LIMIT 2000
@@ -207,7 +207,7 @@ export function createProjectDashboardRouter(pool: Pool) {
         SELECT
           project_name,
           error                                        AS error_message,
-          COALESCE(error_hash, MD5(COALESCE(LOWER(TRIM(error_detail)), project_name || LOWER(TRIM(error))))) AS error_hash,
+          COALESCE(error_hash, MD5(LOWER(TRIM(error)))) AS error_hash,
           COUNT(*)::int                                AS occurrence_count,
           MIN(timestamp)                               AS first_seen,
           COALESCE(MAX(reopened_at), MAX(timestamp))   AS last_seen,
@@ -217,7 +217,7 @@ export function createProjectDashboardRouter(pool: Pool) {
             ELSE 'existing'
           END AS status
         FROM (${union}) AS all_errors
-        GROUP BY project_name, error, COALESCE(error_hash, MD5(COALESCE(LOWER(TRIM(error_detail)), project_name || LOWER(TRIM(error)))))
+        GROUP BY project_name, error, COALESCE(error_hash, MD5(LOWER(TRIM(error))))
       `;
 
       // Apply optional status filter
@@ -292,8 +292,8 @@ export function createProjectErrorUpsertRouter(pool: Pool) {
         shortError = lastLine.split(':')[0].trim() || errorMsg;
       }
 
-      // Compute error_hash from error_detail (preferred) falling back to error
-      const hashSource = errorDetail ?? shortError;
+      // Compute error_hash from error (short form) always — for consistent grouping/regression
+      const hashSource = shortError.toLowerCase().trim();
       const errorHash: string = typeof body.error_hash === 'string' && body.error_hash
         ? body.error_hash
         : require('crypto').createHash('md5').update(hashSource).digest('hex');

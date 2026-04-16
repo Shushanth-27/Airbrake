@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect } from 'react';
+import React from 'react';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Cell, ResponsiveContainer,
 } from 'recharts';
@@ -7,6 +8,7 @@ interface ErrorRow {
   project: string;
   file_name: string | null;
   error: string;
+  error_detail?: string | null;
   timestamp: string | null;
 }
 
@@ -88,8 +90,191 @@ function DatePicker({ label, year, month, day, onChange }: {
   );
 }
 
+function ErrorDetailModal({ row, onClose }: { row: ErrorRow; onClose: () => void }) {
+  const [solutionText, setSolutionText] = useState('');
+  const [savedSolution, setSavedSolution] = useState('');
+  const [mode, setMode] = useState<'view' | 'create' | 'edit'>('view');
+
+  function handleSave() {
+    setSavedSolution(solutionText);
+    setMode('view');
+  }
+
+  function handleCancel() {
+    setSolutionText(savedSolution);
+    setMode('view');
+  }
+
+  function handleCreate() {
+    setSolutionText(savedSolution);
+    setMode('create');
+  }
+
+  return (
+    <div onClick={onClose} style={{
+      position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.75)',
+      backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center',
+      justifyContent: 'center', zIndex: 1000, padding: 24,
+    }}>
+      <div onClick={e => e.stopPropagation()} style={{
+        background: 'var(--surface)', border: '1px solid var(--card-border)',
+        borderRadius: 14, width: '100%', maxWidth: 820,
+        maxHeight: '90vh', display: 'flex', flexDirection: 'column',
+        boxShadow: '0 24px 60px rgba(0,0,0,0.5)',
+      }}>
+        {/* Header */}
+        <div style={{
+          display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between',
+          padding: '20px 26px', borderBottom: '1px solid var(--card-border)',
+        }}>
+          <div>
+            <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 8 }}>Error Detail</div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <span style={{ fontSize: 12, padding: '3px 10px', borderRadius: 4, background: '#6366f120', color: '#818cf8', fontWeight: 700 }}>
+                {row.project}
+              </span>
+              {row.file_name && (
+                <span style={{ fontSize: 12, padding: '3px 10px', borderRadius: 4, background: 'rgba(255,255,255,0.06)', color: 'var(--text-muted)', fontFamily: 'ui-monospace,monospace' }}>
+                  {row.file_name}
+                </span>
+              )}
+              <span style={{ fontSize: 12, padding: '3px 10px', borderRadius: 4, background: 'rgba(239,68,68,0.12)', color: '#f87171', fontWeight: 700 }}>
+                {row.error}
+              </span>
+            </div>
+          </div>
+          <button onClick={onClose} style={{
+            background: 'rgba(255,255,255,0.06)', border: '1px solid var(--card-border)',
+            color: 'var(--text-muted)', fontSize: 16, cursor: 'pointer',
+            width: 32, height: 32, borderRadius: 8, flexShrink: 0,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}>✕</button>
+        </div>
+
+        {/* Body */}
+        <div style={{ overflow: 'auto', padding: '22px 26px', flex: 1, display: 'flex', flexDirection: 'column', gap: 20 }}>
+
+          {/* Error Detail section */}
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 10 }}>
+              Stack Trace
+            </div>
+            {row.error_detail ? (
+              <pre style={{
+                margin: 0, fontFamily: 'ui-monospace, monospace', fontSize: 12,
+                lineHeight: 1.8, color: '#fca5a5',
+                background: 'rgba(239,68,68,0.06)', border: '1px solid rgba(239,68,68,0.15)',
+                borderRadius: 8, padding: '18px 20px',
+                whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+                minHeight: 140,
+              }}>
+                {row.error_detail}
+              </pre>
+            ) : (
+              <div style={{ textAlign: 'center', padding: '40px 0', color: 'var(--text-muted)', fontSize: 13,
+                background: 'rgba(255,255,255,0.02)', border: '1px solid var(--card-border)', borderRadius: 8 }}>
+                <div style={{ fontSize: 28, marginBottom: 8 }}>📭</div>
+                No detailed error information available for this entry.
+              </div>
+            )}
+          </div>
+
+          {/* Solution section */}
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+              <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.07em' }}>
+                💡 Solution
+              </div>
+              {mode === 'view' && !savedSolution && (
+                <button
+                  onClick={handleCreate}
+                  style={{
+                    padding: '5px 14px', borderRadius: 6, fontSize: 12, fontWeight: 600,
+                    cursor: 'pointer', background: 'rgba(99,102,241,0.15)',
+                    color: '#818cf8', border: '1px solid rgba(99,102,241,0.3)',
+                  }}
+                >
+                  + Create Solution
+                </button>
+              )}
+            </div>
+
+            {/* View mode */}
+            {mode === 'view' && (
+              savedSolution ? (
+                <div>
+                  <div style={{
+                    padding: '16px 18px', borderRadius: 8, fontSize: 13, lineHeight: 1.7,
+                    background: 'rgba(16,185,129,0.06)', border: '1px solid rgba(16,185,129,0.2)',
+                    color: 'var(--text)', whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+                    marginBottom: 10,
+                  }}>
+                    {savedSolution}
+                  </div>
+                  <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                    <button onClick={() => { setSolutionText(savedSolution); setMode('edit'); }} style={{
+                      padding: '5px 14px', borderRadius: 6, fontSize: 12, fontWeight: 600,
+                      cursor: 'pointer', background: 'rgba(99,102,241,0.15)',
+                      color: '#818cf8', border: '1px solid rgba(99,102,241,0.3)',
+                    }}>✏️ Edit</button>
+                    <button onClick={() => { setSavedSolution(''); setSolutionText(''); }} style={{
+                      padding: '5px 14px', borderRadius: 6, fontSize: 12, fontWeight: 600,
+                      cursor: 'pointer', background: 'rgba(239,68,68,0.1)',
+                      color: '#f87171', border: '1px solid rgba(239,68,68,0.25)',
+                    }}>🗑 Delete</button>
+                  </div>
+                </div>
+              ) : (
+                <div style={{
+                  padding: '20px', borderRadius: 8, textAlign: 'center',
+                  background: 'rgba(255,255,255,0.02)', border: '1px dashed rgba(255,255,255,0.1)',
+                  color: 'var(--text-muted)', fontSize: 13,
+                }}>
+                  No solution added yet. Click "Create Solution" to add one.
+                </div>
+              )
+            )}
+
+            {/* Create / Edit mode */}
+            {(mode === 'create' || mode === 'edit') && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <textarea
+                  value={solutionText}
+                  onChange={e => setSolutionText(e.target.value)}
+                  placeholder="Describe the solution or fix for this error…"
+                  autoFocus
+                  style={{
+                    width: '100%', minHeight: 120, padding: '14px 16px',
+                    background: 'var(--input-bg)', border: '1px solid var(--input-border)',
+                    borderRadius: 8, color: 'var(--text)', fontSize: 13,
+                    lineHeight: 1.7, resize: 'vertical', outline: 'none',
+                    fontFamily: 'var(--font)',
+                  }}
+                />
+                <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                  <button onClick={handleCancel} style={{
+                    padding: '7px 16px', borderRadius: 6, fontSize: 13, fontWeight: 600,
+                    cursor: 'pointer', background: 'transparent',
+                    color: 'var(--text-muted)', border: '1px solid var(--card-border)',
+                  }}>Cancel</button>
+                  <button onClick={handleSave} style={{
+                    padding: '7px 18px', borderRadius: 6, fontSize: 13, fontWeight: 600,
+                    cursor: 'pointer', background: '#6366f1', color: '#fff', border: 'none',
+                  }}>Save Solution</button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ErrorTable({ rows, emptyMsg }: { rows: ErrorRow[]; emptyMsg: string }) {
   const [filterProject, setFilterProject] = useState('');
+  const [selectedRow, setSelectedRow] = useState<ErrorRow | null>(null);
+  const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
   const projects = Array.from(new Set(rows.map(e => e.project))).sort();
   const filtered = filterProject ? rows.filter(e => e.project === filterProject) : rows;
 
@@ -136,7 +321,21 @@ function ErrorTable({ rows, emptyMsg }: { rows: ErrorRow[]; emptyMsg: string }) 
                   {row.file_name ?? '—'}
                 </td>
                 <td style={{ padding: '9px 14px', color: '#f87171', maxWidth: 320, wordBreak: 'break-word' }}>
-                  {row.error}
+                  <span
+                    onClick={() => setSelectedRow(row)}
+                    onMouseEnter={() => setHoveredIdx(i)}
+                    onMouseLeave={() => setHoveredIdx(null)}
+                    title="Click to view full error detail"
+                    style={{
+                      cursor: 'pointer',
+                      color: hoveredIdx === i ? '#fca5a5' : '#f87171',
+                      textDecoration: hoveredIdx === i ? 'underline dotted' : 'none',
+                      transition: 'color 0.15s',
+                      display: 'inline-block',
+                    }}
+                  >
+                    {row.error}
+                  </span>
                 </td>
                 <td style={{ padding: '9px 14px', color: 'var(--text-muted)', whiteSpace: 'nowrap', fontFamily: 'ui-monospace, monospace', fontSize: 11 }}>
                   {fmt(row.timestamp)}
@@ -146,6 +345,7 @@ function ErrorTable({ rows, emptyMsg }: { rows: ErrorRow[]; emptyMsg: string }) 
           </tbody>
         </table>
       </div>
+      {selectedRow && <ErrorDetailModal row={selectedRow} onClose={() => setSelectedRow(null)} />}
     </>
   );
 }

@@ -10,14 +10,10 @@ DECLARE
 BEGIN
   v_detail := TRIM(NEW.error_detail);
 
+  -- Always derive short error from error_detail if present
   IF v_detail IS NOT NULL AND v_detail <> '' THEN
-    -- Compute error_hash from full error_detail
-    NEW.error_hash := MD5(v_detail);
-
-    -- Derive short error from last non-empty line, before first colon
     v_lines := string_to_array(v_detail, E'\n');
     v_last  := TRIM(v_lines[array_upper(v_lines, 1)]);
-    -- Walk back to find last non-empty line
     FOR i IN REVERSE array_upper(v_lines, 1) .. 1 LOOP
       IF TRIM(v_lines[i]) <> '' THEN
         v_last := TRIM(v_lines[i]);
@@ -25,10 +21,11 @@ BEGIN
       END IF;
     END LOOP;
     NEW.error := TRIM(split_part(v_last, ':', 1));
+  END IF;
 
-  ELSIF NEW.error IS NOT NULL AND TRIM(NEW.error) <> '' THEN
-    -- No error_detail — hash from error
-    NEW.error_hash := MD5(NEW.error);
+  -- error_hash is ALWAYS based on error (short form) for consistent grouping
+  IF NEW.error IS NOT NULL AND TRIM(NEW.error) <> '' THEN
+    NEW.error_hash := MD5(TRIM(NEW.error));
   ELSE
     NEW.error_hash := NULL;
   END IF;
