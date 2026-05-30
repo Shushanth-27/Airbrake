@@ -5,7 +5,7 @@ module.exports = {
   roots: ['<rootDir>/src'],
   testMatch: ['**/__tests__/**/*.test.ts', '**/*.test.ts'],
   moduleNameMapper: {
-    '^@portal/shared$': '<rootDir>/../shared/src/index.ts',
+    '^@portal/shared$': '<rootDir>/src/shared/index.ts',
   },
   collectCoverageFrom: ['src/**/*.ts', '!src/**/*.d.ts', '!src/index.ts'],
   coverageThreshold: {

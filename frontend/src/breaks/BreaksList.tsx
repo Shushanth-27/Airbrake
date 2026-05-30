@@ -1,17 +1,17 @@
-/**
- * Breaks List view — paginated, filterable with status badges and severity indicators.
- * Requirements: 2.1, 2.3, 2.4, 2.5
- */
+import { useEffect, useState } from 'react';
 
-import React, { useEffect, useState } from 'react';
-import type { Break } from '@portal/shared';
-
-interface BreakSummary extends Break {
+interface BreakRow {
+  project_name: string;
+  error_message: string;
+  error_hash: string;
+  occurrence_count: number;
+  first_seen: string | null;
+  last_seen: string | null;
   status: 'new' | 'existing' | 'regression';
 }
 
 interface BreaksPage {
-  data: BreakSummary[];
+  data: BreakRow[];
   total: number;
   page: number;
   limit: number;
@@ -19,29 +19,10 @@ interface BreaksPage {
 
 const LIMIT = 20;
 
-const STATUS_STYLES: Record<string, React.CSSProperties> = {
-  new: { background: 'var(--badge-new)', color: 'var(--badge-new-text)' },
-  regression: { background: 'var(--badge-regression)', color: 'var(--badge-regression-text)' },
-  existing: { background: 'var(--badge-existing)', color: 'var(--badge-existing-text)' },
-};
-
-const STATUS_LABELS: Record<string, string> = {
-  new: 'New',
-  regression: 'Regression',
-  existing: 'Existing',
-};
-
-const SEVERITY_DOT: Record<string, string> = {
-  critical: '#ef4444',
-  error: '#f97316',
-  warning: '#eab308',
-  info: '#3b82f6',
-};
-
 const selectStyle: React.CSSProperties = {
   background: 'var(--input-bg)',
   border: '1px solid var(--input-border)',
-  borderRadius: 'var(--radius-sm)' as unknown as number,
+  borderRadius: 6,
   color: 'var(--text)',
   padding: '7px 28px 7px 11px',
   fontSize: 13,
@@ -53,82 +34,148 @@ const selectStyle: React.CSSProperties = {
   backgroundPosition: 'right 10px center',
 };
 
+const inputStyle: React.CSSProperties = {
+  background: 'var(--input-bg)',
+  border: '1px solid var(--input-border)',
+  borderRadius: 6,
+  color: 'var(--text)',
+  padding: '7px 11px',
+  fontSize: 13,
+  outline: 'none',
+};
+
+function StatusBadge({ status }: { status: 'new' | 'existing' | 'regression' }) {
+  const styles: Record<string, { bg: string; color: string; border: string; label: string }> = {
+    new:        { bg: 'rgba(99,102,241,0.15)',  color: '#818cf8', border: 'rgba(99,102,241,0.3)',  label: '● New' },
+    existing:   { bg: 'rgba(245,158,11,0.15)',  color: '#fbbf24', border: 'rgba(245,158,11,0.3)',  label: '◎ Existing' },
+    regression: { bg: 'rgba(239,68,68,0.15)',   color: '#f87171', border: 'rgba(239,68,68,0.3)',   label: '⚠ Regression' },
+  };
+  const s = styles[status] ?? styles.new;
+  return (
+    <span style={{
+      padding: '3px 10px', borderRadius: 99, fontSize: 11, fontWeight: 700,
+      background: s.bg, color: s.color, border: `1px solid ${s.border}`, flexShrink: 0,
+    }}>{s.label}</span>
+  );
+}
+
+function fmt(ts: string | null) {
+  if (!ts) return '—';
+  return new Date(ts).toLocaleString([], {
+    month: 'short', day: 'numeric', year: 'numeric',
+    hour: '2-digit', minute: '2-digit', hour12: true,
+  });
+}
+
 export function BreaksList() {
   const [page, setPage] = useState(1);
   const [result, setResult] = useState<BreaksPage | null>(null);
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState('');
-  const [severityFilter, setSeverityFilter] = useState('');
+  const [projectFilter, setProjectFilter] = useState('');
+  const [projects, setProjects] = useState<string[]>([]);
+  const [fromDate, setFromDate] = useState('');
+  const [toDate, setToDate] = useState('');
+  const [appliedFrom, setAppliedFrom] = useState('');
+  const [appliedTo, setAppliedTo] = useState('');
+
+  // Fetch project list from DB
+  useEffect(() => {
+    fetch('/api/projects')
+      .then(r => r.json())
+      .then((rows: { name: string }[]) => setProjects(rows.map(r => r.name).sort()))
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-
     const params = new URLSearchParams({
       page: String(page),
       limit: String(LIMIT),
-      ...(statusFilter ? { status: statusFilter } : {}),
-      ...(severityFilter ? { severity: severityFilter } : {}),
+      ...(statusFilter  ? { status:  statusFilter  } : {}),
+      ...(projectFilter ? { project: projectFilter } : {}),
+      ...(appliedFrom   ? { from:    appliedFrom   } : {}),
+      ...(appliedTo     ? { to:      appliedTo     } : {}),
     });
-
-    fetch(`/api/breaks?${params.toString()}`)
-      .then((r) => r.json())
-      .then((data) => { if (!cancelled) { setResult(data as BreaksPage); setLoading(false); } })
+    fetch(`/api/breaks/grouped?${params}`)
+      .then(r => r.json())
+      .then(d => { if (!cancelled) { setResult(d as BreaksPage); setLoading(false); } })
       .catch(() => { if (!cancelled) setLoading(false); });
-
     return () => { cancelled = true; };
-  }, [page, statusFilter, severityFilter]);
+  }, [page, statusFilter, projectFilter, appliedFrom, appliedTo]);
 
   const totalPages = result ? Math.ceil(result.total / LIMIT) : 1;
+
+  function applyDateFilter() {
+    setAppliedFrom(fromDate ? `${fromDate}T00:00:00Z` : '');
+    setAppliedTo(toDate   ? `${toDate}T23:59:59Z`   : '');
+    setPage(1);
+  }
+
+  function clearDateFilter() {
+    setFromDate(''); setToDate('');
+    setAppliedFrom(''); setAppliedTo('');
+    setPage(1);
+  }
 
   return (
     <div data-testid="breaks-list">
       {/* Header */}
       <div style={{ marginBottom: 24 }}>
         <h2 style={{ fontSize: 22, fontWeight: 700, marginBottom: 4 }}>Breaks</h2>
-        <p style={{ fontSize: 13, color: 'var(--text-muted)' }}>Grouped error occurrences across your services</p>
+        <p style={{ fontSize: 13, color: 'var(--text-muted)' }}>
+          Grouped error occurrences across all projects — New vs Existing
+        </p>
       </div>
 
       {/* Filters */}
-      <div
-        data-testid="breaks-filters"
-        style={{
-          display: 'flex',
-          gap: 8,
-          marginBottom: 16,
-          padding: '12px 14px',
-          background: 'var(--surface)',
-          border: '1px solid var(--card-border)',
-          borderRadius: 'var(--radius-md)' as unknown as number,
-          alignItems: 'center',
-        }}
-      >
-        <span style={{ fontSize: 12, color: 'var(--text-muted)', marginRight: 4 }}>Filter:</span>
-        <select
-          data-testid="filter-status"
-          value={statusFilter}
-          onChange={(e) => { setStatusFilter(e.target.value); setPage(1); }}
-          aria-label="Status"
-          style={selectStyle}
-        >
-          <option value="">All statuses</option>
+      <div data-testid="breaks-filters" style={{
+        display: 'flex', gap: 10, marginBottom: 16, flexWrap: 'wrap',
+        padding: '12px 14px',
+        background: 'var(--surface)', border: '1px solid var(--card-border)', borderRadius: 8,
+        alignItems: 'center',
+      }}>
+        <select value={projectFilter}
+          onChange={e => { setProjectFilter(e.target.value); setPage(1); }}
+          aria-label="Project" style={selectStyle}>
+          <option value="">All Projects</option>
+          {projects.map(p => <option key={p} value={p}>{p}</option>)}
+        </select>
+
+        <select data-testid="filter-status" value={statusFilter}
+          onChange={e => { setStatusFilter(e.target.value); setPage(1); }}
+          aria-label="Status" style={selectStyle}>
+          <option value="">All Statuses</option>
           <option value="new">New</option>
           <option value="existing">Existing</option>
           <option value="regression">Regression</option>
         </select>
-        <select
-          data-testid="filter-severity"
-          value={severityFilter}
-          onChange={(e) => { setSeverityFilter(e.target.value); setPage(1); }}
-          aria-label="Severity"
-          style={selectStyle}
-        >
-          <option value="">All severities</option>
-          <option value="critical">Critical</option>
-          <option value="error">Error</option>
-          <option value="warning">Warning</option>
-          <option value="info">Info</option>
-        </select>
+
+        <span style={{ fontSize: 12, color: 'var(--text-muted)', marginLeft: 8 }}>From:</span>
+        <input type="date" value={fromDate} onChange={e => setFromDate(e.target.value)} style={inputStyle} />
+
+        <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>To:</span>
+        <input type="date" value={toDate} onChange={e => setToDate(e.target.value)} style={inputStyle} />
+
+        <button onClick={applyDateFilter} style={{
+          padding: '7px 16px', borderRadius: 6, fontSize: 13, fontWeight: 600,
+          background: '#6366f1', color: '#fff', border: 'none', cursor: 'pointer',
+        }}>Apply</button>
+
+        {(appliedFrom || appliedTo) && (
+          <button onClick={clearDateFilter} style={{
+            padding: '7px 12px', borderRadius: 6, fontSize: 13,
+            background: 'transparent', color: 'var(--text-muted)',
+            border: '1px solid var(--card-border)', cursor: 'pointer',
+          }}>Clear</button>
+        )}
+
+        {result && (
+          <span style={{ fontSize: 12, color: 'var(--text-muted)', marginLeft: 'auto' }}>
+            {result.total} break{result.total !== 1 ? 's' : ''} found
+          </span>
+        )}
       </div>
 
       {loading ? (
@@ -137,133 +184,82 @@ export function BreaksList() {
         </div>
       ) : (
         <>
-          <ul data-testid="breaks-items" style={{ listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 6 }}>
-            {(result?.data ?? []).length === 0 && (
-              <li style={{ padding: '40px 0', textAlign: 'center', color: 'var(--text-muted)', fontSize: 14 }}>
-                No breaks found
-              </li>
-            )}
-            {(result?.data ?? []).map((b) => {
-              const dotColor = SEVERITY_DOT[b.severity] ?? 'var(--text-muted)';
-              return (
-                <li
-                  key={b.id}
-                  data-testid="break-item"
-                  data-severity={b.severity}
-                  data-status={b.status}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 12,
-                    padding: '12px 16px',
-                    background: 'var(--surface)',
-                    border: '1px solid var(--card-border)',
-                    borderRadius: 'var(--radius-sm)' as unknown as number,
-                    transition: 'border-color var(--transition)',
-                  }}
-                >
-                  {/* Severity dot */}
-                  <span
-                    data-testid="critical-indicator"
-                    style={{
-                      width: 8,
-                      height: 8,
-                      borderRadius: '50%',
-                      background: dotColor,
-                      flexShrink: 0,
-                      boxShadow: b.severity === 'critical' ? `0 0 6px ${dotColor}` : 'none',
-                    }}
-                  />
-                  {/* Error message */}
-                  <a
-                    href={`/breaks/${b.id}`}
-                    data-testid="break-link"
-                    style={{
-                      flex: 1,
-                      fontSize: 13.5,
-                      color: 'var(--text)',
-                      fontFamily: 'ui-monospace, monospace',
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
-                    }}
-                  >
-                    {b.errorMessage}
-                  </a>
-                  {/* Status badge */}
-                  {(() => {
-                    const badgeStyle = STATUS_STYLES[b.status] ?? {};
-                    const statusLabel = STATUS_LABELS[b.status] ?? b.status;
-                    return (
-                      <span
-                        data-testid="status-badge"
-                        style={{
-                          ...badgeStyle,
-                          padding: '2px 8px',
-                          borderRadius: 4,
-                          fontSize: 11,
-                          fontWeight: 600,
-                          letterSpacing: 0.3,
-                          flexShrink: 0,
-                        }}
-                      >
-                        {statusLabel}
-                      </span>
-                    );
-                  })()}
-                </li>
-              );
-            })}
-          </ul>
+          {/* Table */}
+          <div style={{ background: 'var(--surface)', border: '1px solid var(--card-border)', borderRadius: 8, overflow: 'hidden' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+              <thead>
+                <tr style={{ background: 'var(--input-bg)' }}>
+                  {['Project', 'Error Message', 'Occurrences', 'First Seen', 'Last Seen', 'Status'].map(h => (
+                    <th key={h} style={{
+                      padding: '10px 16px', textAlign: 'left', fontWeight: 600,
+                      color: 'var(--text-muted)', borderBottom: '1px solid var(--card-border)',
+                      fontSize: 11, textTransform: 'uppercase', letterSpacing: 1, whiteSpace: 'nowrap',
+                    }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {(result?.data ?? []).length === 0 ? (
+                  <tr>
+                    <td colSpan={5} style={{ padding: '40px 0', textAlign: 'center', color: 'var(--text-muted)', fontSize: 14 }}>
+                      No breaks found
+                    </td>
+                  </tr>
+                ) : (result?.data ?? []).map((b, i) => (
+                  <tr key={i} data-testid="break-item" data-status={b.status}
+                    style={{ borderBottom: '1px solid var(--card-border)', background: i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.01)' }}>
+                    <td style={{ padding: '11px 16px', whiteSpace: 'nowrap' }}>
+                      <span style={{
+                        fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 4,
+                        background: '#6366f120', color: '#818cf8',
+                      }}>{b.project_name}</span>
+                    </td>
+                    <td style={{ padding: '11px 16px', color: '#f87171', fontFamily: 'ui-monospace, monospace', fontSize: 12, maxWidth: 340, wordBreak: 'break-word' }}>
+                      {b.error_message}
+                    </td>
+                    <td style={{ padding: '11px 16px', textAlign: 'center' }}>
+                      <span style={{
+                        fontWeight: 700, fontSize: 13,
+                        color: b.occurrence_count > 1 ? '#fbbf24' : '#818cf8',
+                      }}>{b.occurrence_count}</span>
+                    </td>
+                    <td style={{ padding: '11px 16px', color: 'var(--text-muted)', whiteSpace: 'nowrap', fontFamily: 'ui-monospace, monospace', fontSize: 11 }}>
+                      {fmt(b.first_seen)}
+                    </td>
+                    <td style={{ padding: '11px 16px', color: 'var(--text-muted)', whiteSpace: 'nowrap', fontFamily: 'ui-monospace, monospace', fontSize: 11 }}>
+                      {b.status === 'new' ? <span style={{ color: '#475569' }}>—</span> : fmt(b.last_seen)}
+                    </td>
+                    <td style={{ padding: '11px 16px' }}>
+                      <StatusBadge status={b.status} />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
 
           {/* Pagination */}
-          <div
-            data-testid="pagination"
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: 12,
-              marginTop: 20,
-            }}
-          >
-            <button
-              data-testid="prev-page"
-              disabled={page <= 1}
-              onClick={() => setPage((p) => p - 1)}
+          <div data-testid="pagination" style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            gap: 12, marginTop: 20,
+          }}>
+            <button data-testid="prev-page" disabled={page <= 1} onClick={() => setPage(p => p - 1)}
               style={{
-                padding: '7px 16px',
-                background: 'var(--surface)',
-                border: '1px solid var(--card-border)',
-                borderRadius: 'var(--radius-sm)' as unknown as number,
+                padding: '7px 16px', background: 'var(--surface)',
+                border: '1px solid var(--card-border)', borderRadius: 6,
                 color: page <= 1 ? 'var(--text-muted)' : 'var(--text)',
-                cursor: page <= 1 ? 'not-allowed' : 'pointer',
-                fontSize: 13,
-                opacity: page <= 1 ? 0.5 : 1,
-              }}
-            >
-              ← Previous
-            </button>
+                cursor: page <= 1 ? 'not-allowed' : 'pointer', fontSize: 13, opacity: page <= 1 ? 0.5 : 1,
+              }}>← Previous</button>
             <span data-testid="page-info" style={{ fontSize: 13, color: 'var(--text-muted)' }}>
               Page {page} of {totalPages}
             </span>
-            <button
-              data-testid="next-page"
-              disabled={page >= totalPages}
-              onClick={() => setPage((p) => p + 1)}
+            <button data-testid="next-page" disabled={page >= totalPages} onClick={() => setPage(p => p + 1)}
               style={{
-                padding: '7px 16px',
-                background: 'var(--surface)',
-                border: '1px solid var(--card-border)',
-                borderRadius: 'var(--radius-sm)' as unknown as number,
+                padding: '7px 16px', background: 'var(--surface)',
+                border: '1px solid var(--card-border)', borderRadius: 6,
                 color: page >= totalPages ? 'var(--text-muted)' : 'var(--text)',
-                cursor: page >= totalPages ? 'not-allowed' : 'pointer',
-                fontSize: 13,
-                opacity: page >= totalPages ? 0.5 : 1,
-              }}
-            >
-              Next →
-            </button>
+                cursor: page >= totalPages ? 'not-allowed' : 'pointer', fontSize: 13, opacity: page >= totalPages ? 0.5 : 1,
+              }}>Next →</button>
           </div>
         </>
       )}

@@ -1,13 +1,15 @@
 /**
  * Backend entry point — wires all services together with Express REST API.
- * Requirements: 1.1, 2.6, 5.1, 9.2
  */
 
+import 'dotenv/config';
+import WS from 'ws';
 import { AirbrakeClient } from './airbrake/airbrakeClient';
 import { AlertEngine } from './alerts/alertEngine';
 import { createLogPipeline } from './pipeline/logPipeline';
 import { PurgeJob } from './retention/purgeJob';
 import { WebSocketServer } from './websocket/wsServer';
+import { pool } from './db/client';
 
 // ─── Stub adapters ────────────────────────────────────────────────────────────
 
@@ -45,6 +47,9 @@ const logSearchIndexer = {
 
 const parseErrorRepository = {
   save: async (_rawPayload: unknown, errorMessage: string) => {
+    console.error('[PG] parse error:', errorMessage);
+  },
+  write: async (_rawPayload: unknown, errorMessage: string) => {
     console.error('[PG] parse error:', errorMessage);
   },
 };
@@ -113,7 +118,6 @@ const express = require('express');
 const app = express();
 app.use(express.json());
 
-// CORS for local dev
 app.use((_req: unknown, res: { setHeader: (k: string, v: string) => void }, next: () => void) => {
   (res as any).setHeader('Access-Control-Allow-Origin', '*');
   (res as any).setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -128,136 +132,478 @@ import { swaggerSpec } from './api/swagger';
 
 app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
   customSiteTitle: 'Airbrake Portal API Docs',
-  customCss: '.swagger-ui .topbar { background: #0d1526; } .swagger-ui .topbar-wrapper img { content: none; } .swagger-ui .topbar-wrapper::before { content: "🔥 Airbrake Portal"; color: #fff; font-size: 18px; font-weight: 700; }',
 }));
-
-// Expose raw spec for tooling
 app.get('/api/docs.json', (_req: unknown, res: any) => res.json(swaggerSpec));
-
-// Health check
 app.get('/api/health', (_req: unknown, res: any) => res.json({ status: 'ok' }));
 
-// Dashboard aggregation — returns mock data until real DB is wired
-app.get('/api/dashboard', (_req: unknown, res: any) => {
-  const now = Date.now();
-  res.json({
-    breakCounts: { last24h: 42, last7d: 318 },
-    errorRateTrend: Array.from({ length: 6 }, (_, i) => ({
-      timestamp: new Date(now - (5 - i) * 3600_000).toISOString(),
-      count: Math.floor(Math.random() * 20) + 1,
-    })),
-    topServices: [
-      { service: 'api-gateway', count: 87 },
-      { service: 'auth-service', count: 54 },
-      { service: 'payment-service', count: 31 },
-      { service: 'notification-service', count: 18 },
-    ],
-    timeSeries: Array.from({ length: 12 }, (_, i) => ({
-      timestamp: new Date(now - (11 - i) * 3600_000).toISOString(),
-      count: Math.floor(Math.random() * 15) + 1,
-    })),
-    severityBreakdown: [
-      { severity: 'critical', count: 7 },
-      { severity: 'error', count: 35 },
-      { severity: 'warning', count: 89 },
-      { severity: 'info', count: 187 },
-    ],
-    deploymentEvents: [
-      { timestamp: new Date(now - 4 * 3600_000).toISOString(), version: 'v2.4.1', service: 'api-gateway' },
-    ],
-    airbrakeUnreachable: false,
-  });
+// Teams webhook diagnostic — GET /api/health/teams
+app.get('/api/health/teams', async (_req: unknown, res: any) => {
+  const result = await testTeamsWebhook();
+  res.json(result);
 });
 
-// Breaks list
-app.get('/api/breaks', (_req: unknown, res: any) => {
-  res.json({
-    data: [
-      { id: 'b1', applicationId: 'api-gateway', environment: 'production', severity: 'critical', errorMessage: 'NullPointerException in UserController', stackTrace: 'at UserController.getUser (UserController.ts:42)', endpoint: '/api/users/123', requestPayload: null, userSession: null, timestamp: new Date().toISOString(), fingerprint: 'fp1', status: 'new', firstOccurrence: new Date(Date.now() - 3600_000).toISOString(), lastOccurrence: new Date().toISOString(), occurrenceCount: 12, correlatedLogs: [] },
-      { id: 'b2', applicationId: 'auth-service', environment: 'production', severity: 'error', errorMessage: 'JWT verification failed: token expired', stackTrace: 'at AuthMiddleware.verify (auth.ts:88)', endpoint: '/api/auth/verify', requestPayload: { token: '[redacted]' }, userSession: null, timestamp: new Date(Date.now() - 1800_000).toISOString(), fingerprint: 'fp2', status: 'regression', firstOccurrence: new Date(Date.now() - 86400_000).toISOString(), lastOccurrence: new Date().toISOString(), occurrenceCount: 5, correlatedLogs: [] },
-      { id: 'b3', applicationId: 'payment-service', environment: 'production', severity: 'error', errorMessage: 'Stripe API timeout after 30s', stackTrace: 'at PaymentService.charge (payment.ts:156)', endpoint: '/api/payments/charge', requestPayload: null, userSession: null, timestamp: new Date(Date.now() - 7200_000).toISOString(), fingerprint: 'fp3', status: 'existing', firstOccurrence: new Date(Date.now() - 172800_000).toISOString(), lastOccurrence: new Date().toISOString(), occurrenceCount: 3, correlatedLogs: [] },
-    ],
-    total: 3,
-    page: 1,
-    limit: 20,
-  });
-});
-
-// Break detail
-app.get('/api/breaks/:id', (req: any, res: any) => {
-  const breaks: Record<string, unknown> = {
-    b1: { id: 'b1', applicationId: 'api-gateway', environment: 'production', severity: 'critical', errorMessage: 'NullPointerException in UserController', stackTrace: 'at UserController.getUser (UserController.ts:42)\nat Router.handle (router.ts:12)\nat Server.emit (server.ts:88)', endpoint: '/api/users/123', requestPayload: null, userSession: null, timestamp: new Date().toISOString(), fingerprint: 'fp1', status: 'new', firstOccurrence: new Date(Date.now() - 3600_000).toISOString(), lastOccurrence: new Date().toISOString(), occurrenceCount: 12, correlatedLogs: [] },
-  };
-  const b = breaks[req.params.id];
-  if (!b) return res.status(404).json({ error: 'Not Found' });
-  res.json(b);
-});
-
-// Alerts
-app.get('/api/alerts', (_req: unknown, res: any) => res.json([]));
-
-// Users
-app.get('/api/users', (_req: unknown, res: any) => res.json([]));
-
-// Retention
-app.get('/api/retention', (_req: unknown, res: any) => res.json({ applicationId: 'default', retentionDays: 30 }));
-
-// Logs
-app.get('/api/logs', (_req: unknown, res: any) => res.json({ data: [], total: 0 }));
-
-// ─── Ingest API ───────────────────────────────────────────────────────────────
+// ─── DB-backed repositories ───────────────────────────────────────────────────
 
 import { createIngestRouter } from './api/ingestRouter';
+import { createErrorIngestRouter } from './api/errorIngestRouter';
+import { createProjectDashboardRouter, createProjectErrorUpsertRouter, createProjectLiveRouter } from './api/projectDashboardRouter';
+import { createAlertManagementRouter } from './api/alertManagementRouter';
+import { createErrorSolutionRouter } from './api/errorSolutionRouter';
+import { createJiraRouter } from './api/jiraRouter';
+import { startAlertEngine } from './alerts/alertChecker';
+import { testTeamsWebhook } from './alerts/teamsNotifier';
+import { createLogsRouterSync } from './api/logsRouter';
+import { createBreaksRouterSync } from './api/breaksRouter';
+import { createDashboardRouterSync } from './api/dashboardRouter';
+import { createAlertsRouterSync } from './api/alertsRouter';
+import { createFiltersRouterSync } from './api/filtersRouter';
+import { createAdminRouterSync } from './api/adminRouter';
+import { createRbacMiddleware } from './auth/rbac';
 import { DefaultErrorAggregator } from './aggregator/errorAggregator';
+import type { SessionStore } from './auth/oauthHandler';
+import type { AuditLogRepository } from './auth/rbac';
+import type { UserRepository, RetentionPolicyRepository } from './api/adminRouter';
+import type { AlertRuleRepository } from './api/alertsRouter';
+import type { SavedFilterRepository } from './api/filtersRouter';
+import type { LogSearchRepository, BreakExportRepository } from './api/logsRouter';
+import type { BreakRepository as BreaksRouterRepo, LogRepository as BreaksLogRepo } from './api/breaksRouter';
+import type { DashboardRepository } from './api/dashboardRouter';
+import type { BreakGroupRepository, BreakRepository as AggBreakRepo, SearchIndexer } from './aggregator/errorAggregator';
 
-const breakGroupRepository = {
-  findByFingerprint: async (_fp: string) => null,
-  save: async (g: any) => g,
-  update: async (g: any) => g,
+// Session store stub (no real OAuth in dev)
+const sessionStore: SessionStore = {
+  get: async (_token: string) => null,
+  set: async (_token: string, _session: unknown) => {},
+  delete: async (_token: string) => {},
 };
 
-const breakSaveRepository = {
-  save: async (_b: any) => {},
+// Audit log stub
+const auditLogRepo: AuditLogRepository = {
+  log: async (_entry: unknown) => {},
 };
 
-const breakSearchIndexer = {
-  indexBreak: async (_b: any) => {},
-  indexBreakGroup: async (_g: any) => {},
+// User repository (DB-backed)
+const userRepository: UserRepository = {
+  findAll: async () => {
+    const { rows } = await pool.query('SELECT * FROM users ORDER BY created_at DESC');
+    return rows;
+  },
+  create: async (user) => {
+    const { rows } = await pool.query(
+      'INSERT INTO users (email, role, oauth_provider, oauth_subject) VALUES ($1, $2, $3, $4) RETURNING *',
+      [user.email, user.role, user.oauthProvider, user.oauthSubject],
+    );
+    return rows[0];
+  },
+  update: async (id, user) => {
+    const fields = Object.entries(user).map(([k], i) => `${k} = $${i + 2}`).join(', ');
+    const values = Object.values(user);
+    const { rows } = await pool.query(
+      `UPDATE users SET ${fields} WHERE id = $1 RETURNING *`,
+      [id, ...values],
+    );
+    return rows[0] ?? null;
+  },
+  delete: async (id) => {
+    const { rowCount } = await pool.query('DELETE FROM users WHERE id = $1', [id]);
+    return (rowCount ?? 0) > 0;
+  },
+};
+
+// Retention policy repository (DB-backed)
+const retentionPolicyRepository: RetentionPolicyRepository = {
+  findAll: async () => {
+    const { rows } = await pool.query('SELECT * FROM retention_policies');
+    return rows;
+  },
+  upsert: async (policy) => {
+    const { rows } = await pool.query(
+      `INSERT INTO retention_policies (application_id, retention_days)
+       VALUES ($1, $2)
+       ON CONFLICT (application_id) DO UPDATE SET retention_days = EXCLUDED.retention_days
+       RETURNING *`,
+      [policy.applicationId, policy.retentionDays],
+    );
+    return rows[0];
+  },
+};
+
+// Alert rule repository (DB-backed)
+const alertRuleRepository: AlertRuleRepository = {
+  create: async (rule) => {
+    const { rows } = await pool.query(
+      `INSERT INTO alert_rules (name, threshold, window_seconds, trigger_on_new_error, channels, created_by, enabled)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+      [rule.name, rule.threshold, rule.windowSeconds, rule.triggerOnNewError, JSON.stringify(rule.channels), rule.createdBy, rule.enabled ?? true],
+    );
+    return rows[0];
+  },
+  findAll: async () => {
+    const { rows } = await pool.query('SELECT * FROM alert_rules ORDER BY created_at DESC');
+    return rows;
+  },
+  findById: async (id) => {
+    const { rows } = await pool.query('SELECT * FROM alert_rules WHERE id = $1', [id]);
+    return rows[0] ?? null;
+  },
+  update: async (id, rule) => {
+    const fields = Object.entries(rule).map(([k], i) => `${k} = $${i + 2}`).join(', ');
+    const values = Object.values(rule);
+    const { rows } = await pool.query(
+      `UPDATE alert_rules SET ${fields} WHERE id = $1 RETURNING *`,
+      [id, ...values],
+    );
+    return rows[0] ?? null;
+  },
+  delete: async (id) => {
+    const { rowCount } = await pool.query('DELETE FROM alert_rules WHERE id = $1', [id]);
+    return (rowCount ?? 0) > 0;
+  },
+};
+
+// Saved filter repository (DB-backed)
+const savedFilterRepository: SavedFilterRepository = {
+  create: async (filter) => {
+    const { rows } = await pool.query(
+      `INSERT INTO saved_filters (user_id, name, criteria)
+       VALUES ($1, $2, $3) RETURNING *`,
+      [filter.userId, filter.name, JSON.stringify(filter.criteria)],
+    );
+    return rows[0];
+  },
+  findById: async (id) => {
+    const { rows } = await pool.query('SELECT * FROM saved_filters WHERE id = $1', [id]);
+    return rows[0] ?? null;
+  },
+  update: async (id, filter) => {
+    const fields = Object.entries(filter).map(([k], i) => `${k} = $${i + 2}`).join(', ');
+    const values = Object.values(filter);
+    const { rows } = await pool.query(
+      `UPDATE saved_filters SET ${fields} WHERE id = $1 RETURNING *`,
+      [id, ...values],
+    );
+    return rows[0] ?? null;
+  },
+  delete: async (id) => {
+    const { rowCount } = await pool.query('DELETE FROM saved_filters WHERE id = $1', [id]);
+    return (rowCount ?? 0) > 0;
+  },
+};
+
+// Log search repository (DB-backed)
+const logSearchRepository: LogSearchRepository = {
+  search: async (filters) => {
+    const conditions: string[] = [];
+    const values: unknown[] = [];
+    let idx = 1;
+
+    if (filters.keyword) { conditions.push(`message ILIKE $${idx++}`); values.push(`%${filters.keyword}%`); }
+    if (filters.severity) { conditions.push(`severity = $${idx++}`); values.push(filters.severity); }
+    if (filters.applicationId) { conditions.push(`application_id = $${idx++}`); values.push(filters.applicationId); }
+    if (filters.environment) { conditions.push(`environment = $${idx++}`); values.push(filters.environment); }
+    if (filters.from) { conditions.push(`timestamp >= $${idx++}`); values.push(filters.from); }
+    if (filters.to) { conditions.push(`timestamp <= $${idx++}`); values.push(filters.to); }
+
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    const offset = (filters.page - 1) * filters.limit;
+
+    const [dataRes, countRes] = await Promise.all([
+      pool.query(`SELECT * FROM logs ${where} ORDER BY timestamp DESC LIMIT $${idx} OFFSET $${idx + 1}`, [...values, filters.limit, offset]),
+      pool.query(`SELECT COUNT(*) FROM logs ${where}`, values),
+    ]);
+
+    return { data: dataRes.rows, total: parseInt(countRes.rows[0].count, 10) };
+  },
+  searchAll: async (filters) => {
+    const conditions: string[] = [];
+    const values: unknown[] = [];
+    let idx = 1;
+
+    if (filters.keyword) { conditions.push(`message ILIKE $${idx++}`); values.push(`%${filters.keyword}%`); }
+    if (filters.severity) { conditions.push(`severity = $${idx++}`); values.push(filters.severity); }
+    if (filters.applicationId) { conditions.push(`application_id = $${idx++}`); values.push(filters.applicationId); }
+    if (filters.environment) { conditions.push(`environment = $${idx++}`); values.push(filters.environment); }
+    if (filters.from) { conditions.push(`timestamp >= $${idx++}`); values.push(filters.from); }
+    if (filters.to) { conditions.push(`timestamp <= $${idx++}`); values.push(filters.to); }
+
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    const { rows } = await pool.query(`SELECT * FROM logs ${where} ORDER BY timestamp DESC`, values);
+    return rows;
+  },
+};
+
+// Break export repository (DB-backed)
+const breakExportRepository: BreakExportRepository = {
+  exportAll: async (filters) => {
+    const conditions: string[] = [];
+    const values: unknown[] = [];
+    let idx = 1;
+
+    if (filters.severity) { conditions.push(`severity = $${idx++}`); values.push(filters.severity); }
+    if (filters.applicationId) { conditions.push(`application_id = $${idx++}`); values.push(filters.applicationId); }
+    if (filters.from) { conditions.push(`timestamp >= $${idx++}`); values.push(filters.from); }
+    if (filters.to) { conditions.push(`timestamp <= $${idx++}`); values.push(filters.to); }
+
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    const { rows } = await pool.query(`SELECT * FROM breaks ${where} ORDER BY timestamp DESC`, values);
+    return rows;
+  },
+};
+
+// Breaks router repository (DB-backed)
+const breakRepository: BreaksRouterRepo = {
+  findAll: async (filters) => {
+    const conditions: string[] = [];
+    const values: unknown[] = [];
+    let idx = 1;
+
+    if (filters.status) { conditions.push(`status = $${idx++}`); values.push(filters.status); }
+    if (filters.severity) { conditions.push(`severity = $${idx++}`); values.push(filters.severity); }
+    if (filters.applicationId) { conditions.push(`application_id = $${idx++}`); values.push(filters.applicationId); }
+    if (filters.from) { conditions.push(`timestamp >= $${idx++}`); values.push(filters.from); }
+    if (filters.to) { conditions.push(`timestamp <= $${idx++}`); values.push(filters.to); }
+
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    const offset = (filters.page - 1) * filters.limit;
+
+    const [dataRes, countRes] = await Promise.all([
+      pool.query(`SELECT * FROM breaks ${where} ORDER BY timestamp DESC LIMIT $${idx} OFFSET $${idx + 1}`, [...values, filters.limit, offset]),
+      pool.query(`SELECT COUNT(*) FROM breaks ${where}`, values),
+    ]);
+
+    return { data: dataRes.rows, total: parseInt(countRes.rows[0].count, 10) };
+  },
+  findById: async (id) => {
+    const { rows } = await pool.query('SELECT * FROM breaks WHERE id = $1', [id]);
+    return rows[0] ?? null;
+  },
+};
+
+const correlatedLogRepository: BreaksLogRepo = {
+  findCorrelated: async (applicationId, from, to) => {
+    const { rows } = await pool.query(
+      'SELECT * FROM logs WHERE application_id = $1 AND timestamp BETWEEN $2 AND $3 ORDER BY timestamp',
+      [applicationId, from, to],
+    );
+    return rows;
+  },
+};
+
+// Dashboard repository (DB-backed)
+const dashboardRepository: DashboardRepository = {
+  countBreaks: async (windowHours) => {
+    const { rows } = await pool.query(
+      `SELECT COUNT(*) FROM breaks WHERE timestamp >= NOW() - INTERVAL '${windowHours} hours'`,
+    );
+    return parseInt(rows[0].count, 10);
+  },
+  getErrorRateTrend: async (windowHours, bucketHours) => {
+    const { rows } = await pool.query(
+      `SELECT date_trunc('hour', timestamp) AS timestamp, COUNT(*) AS count
+       FROM breaks
+       WHERE timestamp >= NOW() - INTERVAL '${windowHours} hours'
+       GROUP BY 1 ORDER BY 1`,
+    );
+    return rows.map((r: any) => ({ timestamp: r.timestamp, count: parseInt(r.count, 10) }));
+  },
+  getTopServices: async (limit) => {
+    const { rows } = await pool.query(
+      `SELECT application_id AS "applicationId", COUNT(*) AS count
+       FROM breaks GROUP BY 1 ORDER BY 2 DESC LIMIT $1`,
+      [limit],
+    );
+    return rows.map((r: any) => ({ applicationId: r.applicationId, count: parseInt(r.count, 10) }));
+  },
+  getTimeSeries: async (granularity, from, to) => {
+    const trunc = granularity === 'daily' ? 'day' : 'hour';
+    const { rows } = await pool.query(
+      `SELECT date_trunc('${trunc}', timestamp) AS timestamp, COUNT(*) AS count
+       FROM breaks WHERE timestamp BETWEEN $1 AND $2 GROUP BY 1 ORDER BY 1`,
+      [from, to],
+    );
+    return rows.map((r: any) => ({ timestamp: r.timestamp, count: parseInt(r.count, 10) }));
+  },
+  getSeverityBreakdown: async () => {
+    const { rows } = await pool.query(
+      'SELECT severity, COUNT(*) AS count FROM breaks GROUP BY severity',
+    );
+    return Object.fromEntries(rows.map((r: any) => [r.severity, parseInt(r.count, 10)]));
+  },
+};
+
+// Error aggregator repositories (stubs — replace with DB when ready)
+const breakGroupRepository: BreakGroupRepository = {
+  findByFingerprint: async (_fp) => null,
+  save: async (group) => group,
+  update: async (group) => group,
+};
+
+const aggBreakRepository: AggBreakRepo = {
+  save: async (_b) => {},
+};
+
+const searchIndexer: SearchIndexer = {
+  indexBreak: async (_b) => {},
+  indexBreakGroup: async (_g) => {},
 };
 
 const errorAggregator = new DefaultErrorAggregator(
   breakGroupRepository,
-  breakSaveRepository,
-  breakSearchIndexer,
+  aggBreakRepository,
+  searchIndexer,
 );
 
-const ingestParseErrorWriter = {
-  write: async (_raw: unknown, msg: string) => {
-    console.error('[Ingest] parse error:', msg);
-  },
-};
+// ─── Mount routers ────────────────────────────────────────────────────────────
 
-app.use(
-  '/api/ingest',
-  createIngestRouter(
-    logPipeline,
-    errorAggregator,
-    ingestParseErrorWriter,
-    process.env.INGEST_API_KEY,
-  ),
-);
+const rbac = createRbacMiddleware(sessionStore, auditLogRepo) as any;
 
-// ─── Start ────────────────────────────────────────────────────────────────────
+app.use('/api/ingest', createIngestRouter(logPipeline, errorAggregator, parseErrorRepository, process.env.API_KEY));
+// Direct error row insertion — POST /api/ingest/error
+app.use('/api/ingest', createErrorIngestRouter(pool));
+// Project-specific dashboard endpoints (no auth — internal monitoring)
+app.use('/api/dashboard', createProjectDashboardRouter(pool));
+// Breaks grouped endpoint (no auth)
+app.use('/api/breaks', createProjectDashboardRouter(pool));
+// Per-project error upsert (no auth — called by project services)
+app.use('/api/projects', createProjectErrorUpsertRouter(pool));
 
-const PORT = parseInt(process.env.PORT ?? '3001', 10);
-const server = app.listen(PORT, () => {
-  console.log(`[Server] listening on port ${PORT}`);
-  airbrakeClient.start();
-  purgeJob.schedule(24 * 60 * 60 * 1000);
-  setInterval(() => {
-    alertEngine.evaluate([]).catch((err: unknown) => console.error('[AlertEngine] error:', err));
-  }, 60_000);
-  console.log('[Services] started');
+// Live project management + test error injection
+app.use('/api/projects', createProjectLiveRouter(pool));
+
+// Alert management — alert_rules + alert_history tables
+const alertMgmtRouter = createAlertManagementRouter(pool);
+app.use('/api', alertMgmtRouter);
+
+// Error solutions — error_solutions table only
+app.use('/api/error-solution', createErrorSolutionRouter(pool));
+
+// Jira ticket creation
+app.use('/api/jira', createJiraRouter());
+
+// GET /api/projects?category=... — list projects from DB
+app.get('/api/projects', async (req: any, res: any) => {
+  try {
+    const { category } = req.query as { category?: string };
+    const { rows } = category
+      ? await pool.query('SELECT id, name, category FROM projects WHERE category = $1 ORDER BY name', [category])
+      : await pool.query('SELECT id, name, category FROM projects ORDER BY name');
+    res.json(rows);
+  } catch (err) {
+    console.error('[Projects] error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
-export { airbrakeClient, alertEngine, logPipeline, purgeJob, server, wsServer };
+// GET /api/projects/:name/logs — project detail stats from its individual table
+app.get('/api/projects/:name/logs', async (req: any, res: any) => {
+  try {
+    const projectName: string = decodeURIComponent(req.params.name);
+
+    // Derive table name: spaces→underscores, keep special chars as-is
+    const tableName = projectName.replace(/ /g, '_');
+
+    // Check the table exists in information_schema
+    const { rows: tableCheck } = await pool.query(
+      `SELECT table_name FROM information_schema.tables
+       WHERE table_schema = 'public' AND table_name = $1`,
+      [tableName],
+    );
+
+    if (tableCheck.length === 0) {
+      return res.json({ exists: false, tableName, total: 0, filesProcessed: 0, success: 0, failure: 0, totalCost: null, errors: [], logs: [] });
+    }
+
+    // Fetch all rows ordered by timestamp desc
+    const { rows: logs } = await pool.query(
+      `SELECT file_name, timestamp, success_count, failure_count, error,
+              llm_usage, input_tokens, output_tokens, calculated_cost, word_count, file_type,
+              error_status, resolved_at, reopened_at
+       FROM "${tableName}"
+       ORDER BY timestamp DESC
+       LIMIT 500`,
+    );
+
+    const total = logs.length;
+    const filesProcessed = total;
+    const success = logs.filter((r: any) => !r.error || r.error === '').length;
+    const failure = logs.filter((r: any) => r.error && r.error !== '' && r.error_status !== 'resolved').length;
+
+    const rawCost = logs.reduce((sum: number, r: any) => sum + (parseFloat(r.calculated_cost) || 0), 0);
+    const totalCost = rawCost > 0 ? `$${rawCost.toFixed(4)}` : null;
+
+    const errors = logs
+      .filter((r: any) => r.error && r.error !== '' && (r.error_status === 'open' || r.error_status === 'reopened'))
+      .map((r: any) => ({ timestamp: r.timestamp, message: r.error }));
+
+    // Filter resolved rows out of the logs returned to the UI
+    const visibleLogs = logs.map((r: any) => ({
+      ...r,
+      // treat resolved errors as no-error for display purposes
+      error: (r.error_status === 'resolved') ? null : r.error,
+    }));
+
+    res.json({ exists: true, tableName, total, filesProcessed, success, failure, totalCost, errors, logs: visibleLogs });
+  } catch (err) {
+    console.error('[Projects] logs error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+app.use('/api/logs', createLogsRouterSync(logSearchRepository, breakExportRepository, sessionStore, auditLogRepo, rbac));
+app.use('/api/breaks', createBreaksRouterSync(breakRepository, correlatedLogRepository, sessionStore, auditLogRepo, rbac, breakExportRepository));
+app.use('/api/dashboard', createDashboardRouterSync(dashboardRepository, sessionStore, auditLogRepo, rbac));
+app.use('/api/alerts', createAlertsRouterSync(alertRuleRepository, sessionStore, auditLogRepo, rbac));
+app.use('/api/filters', createFiltersRouterSync(savedFilterRepository, sessionStore, auditLogRepo, rbac));
+app.use('/api/admin', createAdminRouterSync(userRepository, retentionPolicyRepository, sessionStore, auditLogRepo, rbac));
+
+// ─── Serve frontend build ─────────────────────────────────────────────────────
+
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const path = require('path');
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const fs = require('fs');
+
+const distPath = path.resolve(__dirname, '../../frontend/dist');
+if (fs.existsSync(distPath)) {
+  app.use(express.static(distPath));
+  // SPA fallback — serve index.html for any non-API route
+  app.get('*', (_req: any, res: any) => {
+    res.sendFile(path.join(distPath, 'index.html'));
+  });
+  console.log(`[Server] serving frontend build from ${distPath}`);
+} else {
+  console.log('[Server] no frontend dist found — skipping static file serving');
+}
+
+// ─── HTTP server + WebSocket ──────────────────────────────────────────────────
+
+const PORT = parseInt(process.env.PORT ?? '3001', 10);
+
+const server = app.listen(PORT, '0.0.0.0', () => {
+  console.log(`[Server] listening on http://localhost:${PORT}`);
+  console.log(`[Server] API docs at http://localhost:${PORT}/api/docs`);
+  // Start alert engine after server is up
+  startAlertEngine(pool).catch(err => console.error('[AlertEngine] failed to start:', err));
+});
+
+// Attach native ws upgrade to the WebSocket server
+const wss = new WS.Server({ noServer: true });
+
+server.on('upgrade', (request: any, socket: any, head: any) => {
+  wss.handleUpgrade(request, socket, head, (ws: any) => {
+    const client = {
+      isAlive: true,
+      send: (data: string) => ws.send(data),
+    };
+    wsServer.addClient(client);
+    ws.on('close', () => wsServer.removeClient(client));
+  });
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('[Server] SIGTERM received, shutting down…');
+  server.close(() => {
+    pool.end();
+    process.exit(0);
+  });
+});

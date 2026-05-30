@@ -6,14 +6,13 @@
     "declaration": true,
     "sourceMap": true,
     "outDir": "./dist",
-    "rootDir": "./src",
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
     "paths": {
-      "@portal/shared": ["../shared/src"]
+      "@portal/shared": ["./src/shared/index.ts"]
     }
   },
   "include": ["src"],
