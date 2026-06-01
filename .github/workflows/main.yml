@@ -46,7 +46,7 @@ jobs:
 
       - name: Sync files to S3 bucket
         run: |
-          aws s3 sync ./build s3://airbrake --delete
+          aws s3 sync ./frontend/build s3://airbrake --delete
 
   # ==========================================
   # BACKEND DEPLOYMENT TO AWS ECS
