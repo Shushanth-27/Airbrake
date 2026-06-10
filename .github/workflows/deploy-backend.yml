@@ -1,0 +1,136 @@
+name: Deploy Python Backend to Lambda
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'backend-python/**'
+      - '.github/workflows/deploy-backend.yml'
+  workflow_dispatch:
+
+env:
+  LAMBDA_FUNCTION:  l7xnpjosjvyrlx55dxrwdvx5g40okeyd
+  LAMBDA_HANDLER:   lambda_function.lambda_handler
+  LAMBDA_RUNTIME:   python3.12
+  DSQL_ENDPOINT:    ezt2bkam5s4kjre73r25easkcu.dsql.us-east-1.on.aws
+  DSQL_REGION:      us-east-1
+  AWS_REGION:       us-east-1
+
+jobs:
+  deploy:
+    name: Build & Deploy Python Lambda
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies into package folder
+        working-directory: backend-python
+        run: |
+          pip install -r requirements.txt -t package/ --quiet
+          echo "Packages installed"
+
+      - name: Copy source files into package folder
+        working-directory: backend-python
+        run: |
+          cp lambda_function.py app.py db.py teams.py alert_engine.py package/
+          echo "Source files copied"
+
+      - name: Create deployment zip
+        working-directory: backend-python/package
+        run: |
+          zip -r ../../lambda-python.zip . -q
+          echo "Zip size: $(du -sh ../../lambda-python.zip | cut -f1)"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Upload zip to Lambda
+        run: |
+          aws lambda update-function-code \
+            --function-name ${{ env.LAMBDA_FUNCTION }} \
+            --zip-file fileb://lambda-python.zip \
+            --output json | jq '{FunctionName, CodeSize, LastModified}'
+
+      - name: Wait for code update
+        run: |
+          aws lambda wait function-updated \
+            --function-name ${{ env.LAMBDA_FUNCTION }}
+
+      - name: Set handler and runtime
+        run: |
+          aws lambda update-function-configuration \
+            --function-name ${{ env.LAMBDA_FUNCTION }} \
+            --handler ${{ env.LAMBDA_HANDLER }} \
+            --runtime ${{ env.LAMBDA_RUNTIME }} \
+            --timeout 30 \
+            --memory-size 512 \
+            --output json | jq '{Handler, Runtime, Timeout, MemorySize}'
+
+      - name: Wait for config update
+        run: |
+          aws lambda wait function-updated \
+            --function-name ${{ env.LAMBDA_FUNCTION }}
+
+      - name: Set environment variables
+        run: |
+          aws lambda update-function-configuration \
+            --function-name ${{ env.LAMBDA_FUNCTION }} \
+            --environment "Variables={DSQL_ENDPOINT=${{ env.DSQL_ENDPOINT }},DSQL_REGION=${{ env.DSQL_REGION }},NODE_ENV=production}" \
+            --output json | jq '.Environment.Variables | keys'
+
+      - name: Wait for env update
+        run: |
+          aws lambda wait function-updated \
+            --function-name ${{ env.LAMBDA_FUNCTION }}
+
+      - name: Attach Aurora DSQL IAM policy to Lambda role
+        run: |
+          ROLE_NAME=$(aws lambda get-function-configuration \
+            --function-name ${{ env.LAMBDA_FUNCTION }} \
+            --query 'Role' --output text | cut -d'/' -f2)
+          echo "Lambda role: $ROLE_NAME"
+
+          cat > /tmp/dsql-policy.json << 'POLICY'
+          {
+            "Version": "2012-10-17",
+            "Statement": [{
+              "Effect": "Allow",
+              "Action": ["dsql:DbConnectAdmin"],
+              "Resource": "arn:aws:dsql:us-east-1:850995535850:cluster/ezt2bkam5s4kjre73r25easkcu"
+            }]
+          }
+          POLICY
+
+          aws iam put-role-policy \
+            --role-name "$ROLE_NAME" \
+            --policy-name "AuroraDSQLAccess" \
+            --policy-document file:///tmp/dsql-policy.json
+          echo "IAM policy attached"
+
+      - name: Smoke test health endpoint
+        run: |
+          sleep 8
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            https://${{ env.LAMBDA_FUNCTION }}.lambda-url.us-east-1.on.aws/api/health)
+          echo "Health: HTTP $STATUS"
+          [ "$STATUS" = "200" ] && echo "✅ Lambda healthy" || (echo "❌ Got $STATUS"; exit 1)
+
+      - name: Smoke test projects endpoint
+        run: |
+          BODY=$(curl -s \
+            https://${{ env.LAMBDA_FUNCTION }}.lambda-url.us-east-1.on.aws/api/projects)
+          echo "Projects: $BODY"
+          COUNT=$(echo "$BODY" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
+          echo "Project count: $COUNT"
+          [ "$COUNT" -gt "0" ] && echo "✅ Aurora DSQL connected — $COUNT projects" || echo "⚠️ No projects yet"
