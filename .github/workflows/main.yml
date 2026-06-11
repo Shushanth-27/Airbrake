@@ -1,14 +1,11 @@
 name: Build and Deploy (FE to S3 & BE to Lambda)
-
 on:
   push:
     branches:
       - main
-
 env:
   AWS_REGION: us-east-1
   LAMBDA_FUNCTION_NAME: airbrake-backend
-
 jobs:
   # ==========================================
   # FRONTEND DEPLOYMENT TO AWS S3
@@ -18,47 +15,40 @@ jobs:
     defaults:
       run:
         working-directory: ./frontend
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
-
       - name: Set up Node.js
         uses: actions/setup-node@v3
         with:
           node-version: "20"
-
       - name: Install Frontend dependencies
         run: npm install
-
       - name: Build Frontend
         run: npm run build
-
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
-
       - name: Sync files to S3 bucket
         run: |
           aws s3 sync ./dist s3://airbrake --delete
-
   # ==========================================
   # BACKEND DEPLOYMENT TO AWS LAMBDA
   # ==========================================
-   deploy-backend:
+  deploy-backend:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
- 
+
       - name: Set up Python 3.14
         uses: actions/setup-python@v5
         with:
           python-version: "3.14"
- 
+
       - name: Package Lambda
         working-directory: ./backend-python
         run: |
@@ -69,25 +59,24 @@ jobs:
             teams.py \
             alert_engine.py
           echo "Zip size: $(du -sh ../lambda.zip | cut -f1)"
- 
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
- 
+
       - name: Deploy to Lambda
         run: |
           aws lambda update-function-code \
             --function-name $LAMBDA_FUNCTION_NAME \
             --zip-file fileb://lambda.zip
- 
+
       - name: Wait for update to complete
         run: |
           aws lambda wait function-updated \
             --function-name $LAMBDA_FUNCTION_NAME
- 
+
       - name: Done
-        run: echo "✅ Backend deployed successfully!"
- 
+        run: echo "Backend deployed successfully!"
