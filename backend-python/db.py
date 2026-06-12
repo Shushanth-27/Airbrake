@@ -8,6 +8,11 @@ can be imported at Lambda cold-start without needing env vars.
 Required Lambda environment variables:
   DSQL_ENDPOINT  = ezt2bkam5s4kjre73r25easkcu.dsql.us-east-1.on.aws
   DSQL_REGION    = us-east-1  (optional, default us-east-1)
+
+For local dev, also set in .env:
+  AWS_ACCESS_KEY_ID     = your key id
+  AWS_SECRET_ACCESS_KEY = your secret key
+  AWS_DEFAULT_REGION    = us-east-1
 """
 
 import os
@@ -16,18 +21,47 @@ import psycopg2.extras
 import boto3
 from typing import Optional
 
+# Load .env file for local development (no-op in Lambda)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # python-dotenv not installed — env vars must be set manually
+
 _conn: Optional[psycopg2.extensions.connection] = None
 
 
 def _get_token(endpoint: str, region: str) -> str:
-    """Generate an IAM auth token for Aurora DSQL via boto3."""
+    """Generate an IAM auth token for Aurora DSQL via boto3.
+
+    Different boto3/botocore versions expose this method with
+    different parameter casing (PascalCase vs snake_case), so
+    try both to stay compatible across environments.
+    """
     client = boto3.client("dsql", region_name=region)
-    # generate_db_connect_admin_auth_token returns a signed URL used as password
-    token = client.generate_db_connect_admin_auth_token(
-        hostname=endpoint,
-        region=region,
-    )
-    return token
+
+    try:
+        # Newer boto3: PascalCase kwargs
+        return client.generate_db_connect_admin_auth_token(
+            Hostname=endpoint,
+            Region=region,
+            ExpiresIn=900,
+        )
+    except TypeError:
+        pass
+
+    try:
+        # Older/alternate boto3: snake_case kwargs
+        return client.generate_db_connect_admin_auth_token(
+            hostname=endpoint,
+            region=region,
+            expires_in=900,
+        )
+    except TypeError:
+        pass
+
+    # Last resort: positional args
+    return client.generate_db_connect_admin_auth_token(endpoint, region)
 
 
 def get_connection() -> psycopg2.extensions.connection:
@@ -63,7 +97,7 @@ def get_connection() -> psycopg2.extensions.connection:
         password=token,
         sslmode="require",
         cursor_factory=psycopg2.extras.RealDictCursor,
-        connect_timeout=5,
+        connect_timeout=10,
     )
     _conn.autocommit = True
     print("[DB] Aurora DSQL connected")
