@@ -70,45 +70,71 @@ SYSTEM_TABLES = (
 )
 
 def get_project_tables():
-    col_check = query("""
-        SELECT EXISTS (
-            SELECT 1 FROM information_schema.columns
-            WHERE table_schema = 'public'
-              AND table_name = 'projects'
-              AND column_name = 'is_live'
-        ) AS exists
-    """)
-    has_is_live = col_check[0]["exists"] if col_check else False
-
-    if has_is_live:
-        live_filter = (
-            "AND REPLACE(c.table_name, '_', ' ') "
-            "IN (SELECT name FROM projects WHERE is_live = true)"
-        )
-    else:
-        live_filter = (
-            "AND c.table_name IN "
-            "('tand_f_rubriq_processing', 'language_quality_score')"
+    """
+    Dynamically discover all valid project tables from information_schema.
+    A valid project table must have: project_name, error_status, error_hash columns.
+    - If the 'projects' registry table exists with is_live column → only return is_live=true tables.
+    - If 'projects' table does NOT exist → return ALL valid tables automatically.
+      This means any new table created in Aurora DSQL with the right columns
+      will automatically appear in the frontend and graphs with no code changes.
+    """
+    try:
+        # Check if projects registry table exists
+        tbl = query(
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema = 'public' AND table_name = 'projects' LIMIT 1"
         )
 
-    rows = query(f"""
-        SELECT c.table_name
-        FROM information_schema.columns c
-        WHERE c.table_schema = 'public'
-          AND c.column_name = 'project_name'
-          AND c.table_name NOT IN %s
-          AND c.table_name IN (
-              SELECT table_name FROM information_schema.columns
-              WHERE table_schema = 'public' AND column_name = 'error_status'
-          )
-          AND c.table_name IN (
-              SELECT table_name FROM information_schema.columns
-              WHERE table_schema = 'public' AND column_name = 'error_hash'
-          )
-          {live_filter}
-        ORDER BY c.table_name
-    """, (SYSTEM_TABLES,))
-    return [r["table_name"] for r in rows]
+        if tbl:
+            # projects table exists — check if is_live column is present
+            col_check = query("""
+                SELECT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND table_name = 'projects'
+                      AND column_name = 'is_live'
+                ) AS exists
+            """)
+            has_is_live = col_check[0]["exists"] if col_check else False
+
+            if has_is_live:
+                live_filter = (
+                    "AND REPLACE(c.table_name, '_', ' ') "
+                    "IN (SELECT name FROM projects WHERE is_live = true)"
+                )
+            else:
+                # projects table exists but no is_live column — include all registered projects
+                live_filter = (
+                    "AND REPLACE(c.table_name, '_', ' ') "
+                    "IN (SELECT name FROM projects)"
+                )
+        else:
+            # No projects registry table at all — discover ALL valid tables dynamically
+            # Any new table created in Aurora DSQL will automatically appear
+            live_filter = ""
+
+        rows = query(f"""
+            SELECT c.table_name
+            FROM information_schema.columns c
+            WHERE c.table_schema = 'public'
+              AND c.column_name = 'project_name'
+              AND c.table_name NOT IN %s
+              AND c.table_name IN (
+                  SELECT table_name FROM information_schema.columns
+                  WHERE table_schema = 'public' AND column_name = 'error_status'
+              )
+              AND c.table_name IN (
+                  SELECT table_name FROM information_schema.columns
+                  WHERE table_schema = 'public' AND column_name = 'error_hash'
+              )
+              {live_filter}
+            ORDER BY c.table_name
+        """, (SYSTEM_TABLES,))
+        return [r["table_name"] for r in rows]
+
+    except Exception as e:
+        print(f"[get_project_tables] error: {e}")
+        return []
 
 
 def find_table(project_name: str):
@@ -157,6 +183,13 @@ def health_teams():
     return jsonify(test_teams_webhook())
 
 
+# ── Debug endpoint — check which tables are being discovered ──────────────────
+@app.route("/api/debug/project-tables")
+def debug_project_tables():
+    tables = get_project_tables()
+    return jsonify({"tables": tables, "count": len(tables)})
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # PROJECTS
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -180,15 +213,24 @@ def list_projects():
                 rows = query("SELECT id, name, category FROM projects ORDER BY name")
             return jsonify(rows)
 
-        # Fallback: discover from information_schema
+        # Fallback: discover dynamically from information_schema
         rows = query(
-            "SELECT DISTINCT table_name FROM information_schema.columns "
-            "WHERE table_schema = 'public' AND column_name = 'project_name' "
-            "AND table_name NOT IN %s ORDER BY table_name",
+            "SELECT DISTINCT c.table_name FROM information_schema.columns c "
+            "WHERE c.table_schema = 'public' AND c.column_name = 'project_name' "
+            "AND c.table_name NOT IN %s "
+            "AND c.table_name IN ("
+            "  SELECT table_name FROM information_schema.columns"
+            "  WHERE table_schema = 'public' AND column_name = 'error_status'"
+            ") "
+            "AND c.table_name IN ("
+            "  SELECT table_name FROM information_schema.columns"
+            "  WHERE table_schema = 'public' AND column_name = 'error_hash'"
+            ") "
+            "ORDER BY c.table_name",
             (SYSTEM_TABLES,),
         )
         projects = [
-            {"id": str(i + 1), "name": r["table_name"].replace("_", " "), "category": "Unknown"}
+            {"id": str(i + 1), "name": r["table_name"].replace("_", " "), "category": "General"}
             for i, r in enumerate(rows)
         ]
         if category:
@@ -207,7 +249,27 @@ def list_live_projects():
             "WHERE table_schema = 'public' AND table_name = 'projects' LIMIT 1"
         )
         if not tbl:
-            return jsonify([])
+            # No projects table — return all dynamically discovered tables as "live"
+            rows = query(
+                "SELECT DISTINCT c.table_name FROM information_schema.columns c "
+                "WHERE c.table_schema = 'public' AND c.column_name = 'project_name' "
+                "AND c.table_name NOT IN %s "
+                "AND c.table_name IN ("
+                "  SELECT table_name FROM information_schema.columns"
+                "  WHERE table_schema = 'public' AND column_name = 'error_status'"
+                ") "
+                "AND c.table_name IN ("
+                "  SELECT table_name FROM information_schema.columns"
+                "  WHERE table_schema = 'public' AND column_name = 'error_hash'"
+                ") "
+                "ORDER BY c.table_name",
+                (SYSTEM_TABLES,),
+            )
+            return jsonify([
+                {"id": str(i + 1), "name": r["table_name"].replace("_", " "),
+                 "category": "General", "is_live": True}
+                for i, r in enumerate(rows)
+            ])
         rows = query(
             "SELECT id, name, category, is_live FROM projects WHERE is_live = true ORDER BY name"
         )
@@ -247,7 +309,6 @@ def project_logs(name):
             {**r, "error": None if r.get("error_status") == "resolved" else r.get("error")}
             for r in logs
         ]
-        # Serialize datetimes
         def serialize(obj):
             if isinstance(obj, datetime):
                 return obj.isoformat()
@@ -716,10 +777,9 @@ def get_break(break_id):
         if not rows:
             return jsonify({"error": "Not Found", "message": "Break not found."}), 404
         row = {k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in rows[0].items()}
-        row["correlatedLogs"] = []  # correlated logs from a separate logs table
+        row["correlatedLogs"] = []
         return jsonify(row)
     except Exception as e:
-        # Table may not exist in Aurora DSQL
         return jsonify({"error": "Not Found", "message": "Break not found."}), 404
 
 
@@ -736,7 +796,6 @@ def dashboard_legacy():
     Falls back to empty data if the breaks/logs tables don't exist in Aurora DSQL.
     """
     try:
-        # Break counts
         def safe_count(sql):
             try:
                 r = query(sql)
@@ -766,6 +825,7 @@ def dashboard_legacy():
             "deploymentEvents": [],
             "airbrakeUnreachable": True,
         })
+
 
 @app.route("/api/alert-rules", methods=["GET"])
 def get_alert_rules():
@@ -956,7 +1016,7 @@ def list_users():
         rows = [{k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in r.items()} for r in rows]
         return jsonify(rows)
     except Exception:
-        return jsonify([])  # table may not exist
+        return jsonify([])
 
 
 @app.route("/api/users", methods=["POST"])

@@ -1,7 +1,7 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useMemo } from 'react';
 import React from 'react';
 import {
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Cell, ResponsiveContainer,
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Cell, ResponsiveContainer, Legend,
 } from 'recharts';
 import { apiFetch, ApiError } from '../lib/api';
 
@@ -563,11 +563,110 @@ export function Dashboard() {
 
   // Auto-fetch all errors on mount (no date filter = all data)
   useEffect(() => { fetchRange('', '', '', '', '', ''); }, []);
+  // ── Project Comparison data (merge topProjects + topErrorProjects) ──
+  const comparisonData = useMemo(() => {
+    const map = new Map<string, { name: string; mostUsed: number; errorProducing: number }>();
+
+    topProjects.forEach((p) => {
+      const key = p.project_name;
+      if (!map.has(key)) map.set(key, { name: key, mostUsed: 0, errorProducing: 0 });
+      map.get(key)!.mostUsed = Number(p.total);
+    });
+
+    topErrorProjects.forEach((p) => {
+      const key = p.project_name;
+      if (!map.has(key)) map.set(key, { name: key, mostUsed: 0, errorProducing: 0 });
+      map.get(key)!.errorProducing = Number(p.total);
+    });
+
+    return Array.from(map.values())
+      .sort((a, b) => (b.mostUsed + b.errorProducing) - (a.mostUsed + a.errorProducing))
+      .slice(0, 15)
+      .map((d) => ({
+        ...d,
+        shortName: d.name.length > 16 ? d.name.slice(0, 15) + '…' : d.name,
+      }));
+  }, [topProjects, topErrorProjects]);
+
   return (
     <div>
       <div style={{ marginBottom: 24 }}>
         <h2 style={{ fontSize: 22, fontWeight: 700, marginBottom: 4 }}>Dashboard</h2>
         <p style={{ fontSize: 13, color: 'var(--text-muted)' }}>Live error monitoring across all 85 projects</p>
+      </div>
+
+      {/* ── Project Comparison Chart ── */}
+      <div style={{ ...card, marginBottom: 24 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+          <h3 style={{ ...cardTitle, margin: 0 }}>Project Comparison</h3>
+          {/* Legend */}
+          <div style={{ display: 'flex', gap: 16, alignItems: 'center' }}>
+            <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--text-muted)' }}>
+              <span style={{ width: 12, height: 12, borderRadius: 2, background: '#7c6ff7', flexShrink: 0 }} />
+              Most used
+            </span>
+            <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--text-muted)' }}>
+              <span style={{ width: 12, height: 12, borderRadius: 2, background: '#f97316', flexShrink: 0 }} />
+              Error producing
+            </span>
+          </div>
+        </div>
+
+        {topLoading || topErrorLoading ? (
+          <div style={{ textAlign: 'center', padding: '60px 0', color: 'var(--text-muted)', fontSize: 13 }}>Loading…</div>
+        ) : comparisonData.length === 0 ? (
+          <div style={{ textAlign: 'center', padding: '60px 0', color: 'var(--text-muted)', fontSize: 13 }}>No project data available.</div>
+        ) : (
+          <ResponsiveContainer width="100%" height={280}>
+            <BarChart
+              data={comparisonData}
+              margin={{ top: 16, right: 16, left: 0, bottom: 60 }}
+              barCategoryGap="30%"
+              barGap={3}
+            >
+              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" vertical={false} />
+              <XAxis
+                dataKey="shortName"
+                tick={{ fill: 'rgba(255,255,255,0.45)', fontSize: 10 }}
+                tickLine={false}
+                axisLine={{ stroke: 'rgba(255,255,255,0.08)' }}
+                angle={-35}
+                textAnchor="end"
+                interval={0}
+              />
+              <YAxis
+                tick={{ fill: 'rgba(255,255,255,0.3)', fontSize: 10 }}
+                tickLine={false}
+                axisLine={false}
+                width={28}
+              />
+              <Tooltip
+                cursor={{ fill: 'rgba(255,255,255,0.04)' }}
+                content={({ active, payload, label }: any) => {
+                  if (!active || !payload?.length) return null;
+                  const full = comparisonData.find((d) => d.shortName === label)?.name ?? label;
+                  return (
+                    <div style={{
+                      background: '#1e293b', border: '1px solid rgba(255,255,255,0.1)',
+                      borderRadius: 8, padding: '10px 14px', fontSize: 13,
+                    }}>
+                      <div style={{ color: '#e2e8f0', fontWeight: 700, marginBottom: 8 }}>{full}</div>
+                      {payload.map((p: any) => (
+                        <div key={p.dataKey} style={{ color: '#94a3b8', marginBottom: 3 }}>
+                          <span style={{ color: p.fill, fontWeight: 700 }}>■ </span>
+                          {p.dataKey === 'mostUsed' ? 'Most used' : 'Error producing'}:{' '}
+                          <span style={{ color: '#fff', fontWeight: 700 }}>{p.value}</span>
+                        </div>
+                      ))}
+                    </div>
+                  );
+                }}
+              />
+              <Bar dataKey="mostUsed" fill="#7c6ff7" radius={[4, 4, 0, 0]} maxBarSize={32} />
+              <Bar dataKey="errorProducing" fill="#f97316" radius={[4, 4, 0, 0]} maxBarSize={32} />
+            </BarChart>
+          </ResponsiveContainer>
+        )}
       </div>
 
       {/* ── Two column charts ── */}

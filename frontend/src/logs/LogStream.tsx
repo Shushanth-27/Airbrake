@@ -234,7 +234,7 @@ function SectionHeader({ title, count, color, collapsed, onToggle }: {
           background: `${color}20`, color,
         }}>{count}</span>
       </div>
-      <span style={{ color, fontSize: 18, lineHeight: 1, transition: 'transform 0.2s', transform: collapsed ? 'none' : 'rotate(180deg)', display: 'inline-block' }}>▾</span>
+      <span style={{ color, fontSize: 28, lineHeight: 1, transition: 'transform 0.2s', transform: collapsed ? 'none' : 'rotate(180deg)', display: 'inline-block' }}>▾</span>
     </button>
   );
 }
