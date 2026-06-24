@@ -28,7 +28,7 @@ ALLOWED_ORIGINS = {
     "http://localhost:3001",
 }
 
-
+#new version check
 @app.after_request
 def add_cors_headers(response):
     origin = request.headers.get("Origin", "")
