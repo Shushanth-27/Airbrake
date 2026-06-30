@@ -1,5 +1,5 @@
 /**
- * AI Services Dashboard — tiles for all 84 projects with category filter and detail modal.
+ * AI Services Dashboard — tiles for all projects with category filter and detail modal.
  */
 
 import { useEffect, useState } from 'react';
@@ -465,7 +465,7 @@ export function LogStream() {
     <div data-testid="log-stream">
       <div style={{ marginBottom: 20 }}>
         <h2 style={{ fontSize: 22, fontWeight: 700, marginBottom: 4 }}>AI Services</h2>
-        <p style={{ fontSize: 13, color: 'var(--text-muted)' }}>All 84 projects at a glance — click a tile to view data</p>
+        <p style={{ fontSize: 13, color: 'var(--text-muted)' }}>All projects at a glance — click a tile to view data</p>
       </div>
 
       {/* Category filter tabs */}

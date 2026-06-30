@@ -459,9 +459,9 @@ def ingest_success():
 def dashboard_top_projects():
     try:
         rows = query("""
-            SELECT pr.project_name, COUNT(*)::int AS total
+            SELECT pr.project_name, CAST(COUNT(*) AS int) AS total
             FROM project_results pr
-            JOIN projects p ON LOWER(p.name) = LOWER(pr.project_name) AND p.is_live = true
+            JOIN projects p ON LOWER(p.name) = LOWER(pr.project_name)
             GROUP BY pr.project_name
             ORDER BY total DESC LIMIT 10
         """)
@@ -475,9 +475,9 @@ def dashboard_top_projects():
 def dashboard_top_error_projects():
     try:
         rows = query("""
-            SELECT pr.project_name, COUNT(*)::int AS total
+            SELECT pr.project_name, CAST(COUNT(*) AS int) AS total
             FROM project_results pr
-            JOIN projects p ON LOWER(p.name) = LOWER(pr.project_name) AND p.is_live = true
+            JOIN projects p ON LOWER(p.name) = LOWER(pr.project_name)
             WHERE pr.error IS NOT NULL AND pr.error <> ''
               AND pr.error_status IN ('open', 'reopened')
             GROUP BY pr.project_name
@@ -498,7 +498,7 @@ def dashboard_today_errors():
             SELECT pr.project_name AS project, pr.file_name, pr.error,
                    pr.error_detail, pr.error_hash, pr.timestamp
             FROM project_results pr
-            JOIN projects p ON LOWER(p.name) = LOWER(pr.project_name) AND p.is_live = true
+            JOIN projects p ON LOWER(p.name) = LOWER(pr.project_name)
             WHERE pr.error IS NOT NULL AND pr.error <> ''
               AND pr.error_status IN ('open', 'reopened')
               AND (
@@ -541,7 +541,7 @@ def dashboard_errors():
             f"SELECT pr.project_name AS project, pr.file_name, pr.error, "
             f"pr.error_detail, pr.error_hash, pr.timestamp "
             f"FROM project_results pr "
-            f"JOIN projects p ON LOWER(p.name) = LOWER(pr.project_name) AND p.is_live = true "
+            f"JOIN projects p ON LOWER(p.name) = LOWER(pr.project_name) "
             f"WHERE {where} "
             f"ORDER BY pr.timestamp DESC LIMIT 2000",
             params if params else None,
@@ -597,7 +597,7 @@ def breaks_grouped():
             f"  ELSE 'existing' "
             f"END AS status "
             f"FROM project_results pr "
-            f"JOIN projects p ON LOWER(p.name) = LOWER(pr.project_name) AND p.is_live = true "
+            f"JOIN projects p ON LOWER(p.name) = LOWER(pr.project_name) "
             f"WHERE {where} "
             f"GROUP BY pr.project_name, pr.error, COALESCE(pr.error_hash, MD5(LOWER(TRIM(pr.error))))"
         )
@@ -645,6 +645,78 @@ def get_break(break_id):
         return jsonify(row)
     except Exception:
         return jsonify({"error": "Not Found", "message": "Break not found."}), 404
+
+
+@app.route("/api/breaks/detail/<error_hash>")
+def get_break_detail(error_hash):
+    """
+    GET /api/breaks/detail/:error_hash
+    Returns full error detail for the Error Details page:
+      - project_name, error_message, error_detail (stack trace), error_hash
+      - occurrence_count, first_seen, last_seen, status
+      - All occurrence rows (file_name, timestamp)
+      - Saved solution (if any)
+    """
+    try:
+        # Get grouped error info
+        error_rows = query(
+            "SELECT project_name, error AS error_message, error_detail, error_hash, "
+            "failure_count, timestamp, error_status, reopened_at, file_name "
+            "FROM project_results "
+            "WHERE error_hash = %s AND error IS NOT NULL AND error <> '' "
+            "ORDER BY timestamp DESC",
+            (error_hash,),
+        )
+        if not error_rows:
+            return jsonify({"error": "Not Found", "message": "Error not found."}), 404
+
+        first = error_rows[0]
+        occurrence_count = sum(r.get("failure_count", 1) for r in error_rows)
+        first_seen = min(r["timestamp"] for r in error_rows if r.get("timestamp"))
+        last_seen = max(r.get("reopened_at") or r["timestamp"] for r in error_rows if r.get("timestamp"))
+
+        has_reopened = any(r.get("error_status") == "reopened" for r in error_rows)
+        if has_reopened:
+            status = "regression"
+        elif occurrence_count == 1:
+            status = "new"
+        else:
+            status = "existing"
+
+        occurrences = [
+            {"file_name": r.get("file_name"), "timestamp": r["timestamp"], "failure_count": r.get("failure_count", 1)}
+            for r in error_rows
+        ]
+
+        # Get saved solution
+        solution_rows = query(
+            "SELECT solution, updated_at FROM error_solutions WHERE error_hash = %s",
+            (error_hash,),
+        )
+        solution_data = None
+        if solution_rows:
+            s = solution_rows[0]
+            solution_data = {
+                "solution": s["solution"],
+                "updated_at": s["updated_at"].isoformat() if s.get("updated_at") else None,
+            }
+
+        result = {
+            "project_name": first["project_name"],
+            "error_message": first["error_message"],
+            "error_detail": first.get("error_detail"),
+            "error_hash": error_hash,
+            "occurrence_count": occurrence_count,
+            "first_seen": first_seen,
+            "last_seen": last_seen,
+            "status": status,
+            "occurrences": serialize_rows(occurrences),
+            "solution": solution_data,
+        }
+        return jsonify(serialize_row(result))
+    except Exception as e:
+        print(f"[Breaks] detail error: {e}")
+        return jsonify({"error": "Internal server error"}), 500
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -7,6 +7,7 @@ import { Layout } from './layout/Layout';
 import { Dashboard } from './dashboard/Dashboard';
 import { LogStream } from './logs/LogStream';
 import { BreaksList } from './breaks/BreaksList';
+import { ErrorDetail } from './breaks/ErrorDetail';
 import { AlertManagement } from './alerts/AlertManagement';
 import { Settings } from './settings/Settings';
 import type { Role } from '@portal/shared';
@@ -25,6 +26,7 @@ function AppShell() {
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/logs" element={<LogStream />} />
         <Route path="/breaks" element={<BreaksList />} />
+        <Route path="/breaks/:errorHash" element={<ErrorDetail />} />
         <Route path="/alerts" element={<AlertManagement role={role} />} />
         <Route path="/settings" element={<Settings role={role} />} />
         <Route path="/" element={<Navigate to="/dashboard" replace />} />

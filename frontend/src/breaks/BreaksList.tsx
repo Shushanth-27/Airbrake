@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { apiFetch } from '../lib/api';
 
 interface BreakRow {
@@ -69,6 +70,7 @@ function fmt(ts: string | null) {
 }
 
 export function BreaksList() {
+  const navigate = useNavigate();
   const [page, setPage] = useState(1);
   const [result, setResult] = useState<BreaksPage | null>(null);
   const [loading, setLoading] = useState(true);
@@ -208,7 +210,8 @@ export function BreaksList() {
                   </tr>
                 ) : (result?.data ?? []).map((b, i) => (
                   <tr key={i} data-testid="break-item" data-status={b.status}
-                    style={{ borderBottom: '1px solid var(--card-border)', background: i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.01)' }}>
+                    onClick={() => navigate(`/breaks/${b.error_hash}`)}
+                    style={{ borderBottom: '1px solid var(--card-border)', background: i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.01)', cursor: 'pointer' }}>
                     <td style={{ padding: '11px 16px', whiteSpace: 'nowrap' }}>
                       <span style={{
                         fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 4,

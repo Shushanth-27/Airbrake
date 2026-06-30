@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect, useMemo } from 'react';
 import React from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Cell, ResponsiveContainer, Legend,
 } from 'recharts';
@@ -93,6 +94,7 @@ function DatePicker({ label, year, month, day, onChange }: {
 }
 
 function ErrorDetailModal({ row, onClose }: { row: ErrorRow; onClose: () => void }) {
+  const navigate = useNavigate();
   const [solutionText, setSolutionText] = useState('');
   const [savedSolution, setSavedSolution] = useState('');
   const [mode, setMode] = useState<'view' | 'create' | 'edit'>('view');
@@ -202,6 +204,12 @@ function ErrorDetailModal({ row, onClose }: { row: ErrorRow; onClose: () => void
               <span style={{ fontSize: 12, padding: '3px 10px', borderRadius: 4, background: 'rgba(239,68,68,0.12)', color: '#f87171', fontWeight: 700 }}>
                 {row.error}
               </span>
+              {row.error_hash && (
+                <button onClick={() => { onClose(); navigate(`/breaks/${row.error_hash}`); }}
+                  style={{ fontSize: 12, padding: '3px 10px', borderRadius: 4, background: 'rgba(99,102,241,0.12)', color: '#818cf8', fontWeight: 600, border: '1px solid rgba(99,102,241,0.3)', cursor: 'pointer' }}>
+                  View Full Details →
+                </button>
+              )}
             </div>
           </div>
           <button onClick={onClose} style={{
@@ -592,7 +600,7 @@ export function Dashboard() {
     <div>
       <div style={{ marginBottom: 24 }}>
         <h2 style={{ fontSize: 22, fontWeight: 700, marginBottom: 4 }}>Dashboard</h2>
-        <p style={{ fontSize: 13, color: 'var(--text-muted)' }}>Live error monitoring across all 85 projects</p>
+        <p style={{ fontSize: 13, color: 'var(--text-muted)' }}>Live error monitoring across all projects</p>
       </div>
 
       {/* ── Project Comparison Chart ── */}
@@ -799,7 +807,7 @@ export function Dashboard() {
       )}
       {rangeLoading && (
         <div style={{ ...card, textAlign: 'center', padding: '40px 0', color: 'var(--text-muted)', fontSize: 13 }}>
-          Fetching errors across all 85 projects…
+          Fetching errors across all projects…
         </div>
       )}
     </div>
