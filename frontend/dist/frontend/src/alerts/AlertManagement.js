@@ -40,6 +40,7 @@ const jsx_runtime_1 = require("react/jsx-runtime");
  * Mock data only — no backend connection.
  */
 const react_1 = __importStar(require("react"));
+const api_1 = require("../lib/api");
 // ─── Mock data ────────────────────────────────────────────────────────────────
 const MOCK_PROJECTS = []; // replaced by DB fetch — see useProjects()
 const MOCK_RULES = [
@@ -109,7 +110,7 @@ const CHANNEL_ICONS = {
 function useProjects() {
     const [projects, setProjects] = react_1.default.useState([]);
     react_1.default.useEffect(() => {
-        fetch('/api/projects')
+        (0, api_1.apiFetch)('/api/projects')
             .then(r => r.json())
             .then((rows) => setProjects(rows.map(r => r.name).sort()))
             .catch(console.error);
@@ -268,14 +269,14 @@ function AlertManagement({ role }) {
         };
     }
     function loadRules() {
-        fetch('/api/alert-rules')
+        (0, api_1.apiFetch)('/api/alert-rules')
             .then(r => r.json())
             .then((rows) => setRules(rows.map(mapRule)))
             .catch(console.error)
             .finally(() => setLoading(false));
     }
     function loadTriggered() {
-        fetch('/api/alert-history')
+        (0, api_1.apiFetch)('/api/alert-history')
             .then(r => r.json())
             .then((rows) => setTriggered(rows.map(mapTriggered)))
             .catch(console.error);
@@ -297,12 +298,12 @@ function AlertManagement({ role }) {
             is_active: draft.status === 'active',
         };
         if (editTarget) {
-            await fetch(`/api/alert-rules/${editTarget.id}`, {
+            await (0, api_1.apiFetch)(`/api/alert-rules/${editTarget.id}`, {
                 method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
             });
         }
         else {
-            await fetch('/api/alert-rules', {
+            await (0, api_1.apiFetch)('/api/alert-rules', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
             });
         }
@@ -312,11 +313,11 @@ function AlertManagement({ role }) {
     async function handleDelete(id) {
         if (!window.confirm('Delete this alert rule?'))
             return;
-        await fetch(`/api/alert-rules/${id}`, { method: 'DELETE' });
+        await (0, api_1.apiFetch)(`/api/alert-rules/${id}`, { method: 'DELETE' });
         loadRules();
     }
     async function handleToggle(id) {
-        await fetch(`/api/alert-rules/${id}/toggle`, { method: 'PATCH' });
+        await (0, api_1.apiFetch)(`/api/alert-rules/${id}/toggle`, { method: 'PATCH' });
         loadRules();
     }
     const TABS = [

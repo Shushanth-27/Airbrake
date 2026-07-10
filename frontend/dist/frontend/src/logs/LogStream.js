@@ -3,9 +3,10 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.LogStream = LogStream;
 const jsx_runtime_1 = require("react/jsx-runtime");
 /**
- * AI Services Dashboard — tiles for all 84 projects with category filter and detail modal.
+ * AI Services Dashboard — tiles for all projects with category filter and detail modal.
  */
 const react_1 = require("react");
+const api_1 = require("../lib/api");
 const CATEGORIES = ['All', 'Gen AI', 'Computer Vision', 'Traditional Model', 'RAG', 'Analytics'];
 const CATEGORY_COLOR = {
     'Gen AI': '#6366f1',
@@ -104,7 +105,7 @@ function SectionHeader({ title, count, color, collapsed, onToggle }) {
         }, children: [(0, jsx_runtime_1.jsxs)("div", { style: { display: 'flex', alignItems: 'center', gap: 8 }, children: [(0, jsx_runtime_1.jsx)("span", { style: { fontSize: 13, fontWeight: 700, color }, children: title }), (0, jsx_runtime_1.jsx)("span", { style: {
                             fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 99,
                             background: `${color}20`, color,
-                        }, children: count })] }), (0, jsx_runtime_1.jsx)("span", { style: { color: '#475569', fontSize: 12, transition: 'transform 0.2s', transform: collapsed ? 'none' : 'rotate(180deg)' }, children: "\u25BE" })] }));
+                        }, children: count })] }), (0, jsx_runtime_1.jsx)("span", { style: { color, fontSize: 28, lineHeight: 1, transition: 'transform 0.2s', transform: collapsed ? 'none' : 'rotate(180deg)', display: 'inline-block' }, children: "\u25BE" })] }));
 }
 // ─── Main Modal ───────────────────────────────────────────────────────────────
 function ProjectModal({ project, onClose }) {
@@ -113,7 +114,7 @@ function ProjectModal({ project, onClose }) {
     const [failedCollapsed, setFailedCollapsed] = (0, react_1.useState)(false);
     const [successCollapsed, setSuccessCollapsed] = (0, react_1.useState)(true);
     (0, react_1.useEffect)(() => {
-        fetch(`/api/projects/${encodeURIComponent(project.name)}/logs`)
+        (0, api_1.apiFetch)(`/api/projects/${encodeURIComponent(project.name)}/logs`)
             .then((r) => r.json())
             .then((d) => { setStats(d); setLoading(false); })
             .catch(() => setLoading(false));
@@ -182,13 +183,18 @@ function LogStream() {
     (0, react_1.useEffect)(() => {
         setLoading(true);
         const params = activeCategory !== 'All' ? `?category=${encodeURIComponent(activeCategory)}` : '';
-        fetch(`/api/projects${params}`)
+        (0, api_1.apiFetch)(`/api/projects${params}`)
             .then((r) => r.json())
-            .then((data) => { setProjects(data); setLoading(false); })
+            .then((data) => {
+            const filtered = data.filter((p) => p.name !== 'document_similarity_matcher');
+            setProjects(filtered);
+            setLoading(false);
+        })
             .catch(() => setLoading(false));
     }, [activeCategory]);
-    const filtered = projects.filter((p) => p.name.toLowerCase().includes(search.toLowerCase()));
-    return ((0, jsx_runtime_1.jsxs)("div", { "data-testid": "log-stream", children: [(0, jsx_runtime_1.jsxs)("div", { style: { marginBottom: 20 }, children: [(0, jsx_runtime_1.jsx)("h2", { style: { fontSize: 22, fontWeight: 700, marginBottom: 4 }, children: "AI Services" }), (0, jsx_runtime_1.jsx)("p", { style: { fontSize: 13, color: 'var(--text-muted)' }, children: "All 84 projects at a glance \u2014 click a tile to view data" })] }), (0, jsx_runtime_1.jsx)("div", { style: { display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 16 }, children: CATEGORIES.map((cat) => {
+    const HIDDEN = new Set(['document_similarity_matcher', 'lat', 'ai services']);
+    const filtered = projects.filter((p) => p.name.toLowerCase().includes(search.toLowerCase()) && !HIDDEN.has(p.name.toLowerCase()));
+    return ((0, jsx_runtime_1.jsxs)("div", { "data-testid": "log-stream", children: [(0, jsx_runtime_1.jsxs)("div", { style: { marginBottom: 20 }, children: [(0, jsx_runtime_1.jsx)("h2", { style: { fontSize: 22, fontWeight: 700, marginBottom: 4 }, children: "AI Services" }), (0, jsx_runtime_1.jsx)("p", { style: { fontSize: 13, color: 'var(--text-muted)' }, children: "All projects at a glance \u2014 click a tile to view data" })] }), (0, jsx_runtime_1.jsx)("div", { style: { display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 16 }, children: CATEGORIES.map((cat) => {
                     const active = activeCategory === cat;
                     const color = CATEGORY_COLOR[cat] ?? '#6366f1';
                     return ((0, jsx_runtime_1.jsx)("button", { onClick: () => { setActiveCategory(cat); setSearch(''); }, style: {

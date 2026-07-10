@@ -6,6 +6,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.useDashboard = useDashboard;
 const react_1 = require("react");
+const api_1 = require("../lib/api");
 const EMPTY = {
     breakCounts: { last24h: 0, last7d: 0 },
     errorRateTrend: [],
@@ -25,9 +26,7 @@ function useDashboard(apiBase = '/api') {
             setLoading(true);
             setError(null);
             try {
-                const res = await fetch(`${apiBase}/dashboard`);
-                if (!res.ok)
-                    throw new Error(`HTTP ${res.status}`);
+                const res = await (0, api_1.apiFetch)(`${apiBase}/dashboard`);
                 const json = await res.json();
                 if (!cancelled)
                     setData(json);

@@ -7,7 +7,8 @@ exports.Dashboard = Dashboard;
 const jsx_runtime_1 = require("react/jsx-runtime");
 const react_1 = require("react");
 const react_2 = __importDefault(require("react"));
-const recharts_1 = require("recharts");
+const react_router_dom_1 = require("react-router-dom");
+const api_1 = require("../lib/api");
 const card = {
     background: 'var(--card-bg)',
     border: '1px solid var(--card-border)',
@@ -56,6 +57,7 @@ function DatePicker({ label, year, month, day, onChange }) {
     return ((0, jsx_runtime_1.jsxs)("div", { style: { display: 'flex', flexDirection: 'column', gap: 6 }, children: [(0, jsx_runtime_1.jsx)("span", { style: { fontSize: 11, color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1 }, children: label }), (0, jsx_runtime_1.jsxs)("div", { style: { display: 'flex', gap: 6 }, children: [(0, jsx_runtime_1.jsxs)("select", { value: year, onChange: e => onChange(e.target.value, month, day), style: selectStyle, children: [(0, jsx_runtime_1.jsx)("option", { value: "", children: "Year" }), years.map(y => (0, jsx_runtime_1.jsx)("option", { value: y, children: y }, y))] }), (0, jsx_runtime_1.jsxs)("select", { value: month, onChange: e => onChange(year, e.target.value, day), style: selectStyle, children: [(0, jsx_runtime_1.jsx)("option", { value: "", children: "Month" }), MONTHS.map((mn, i) => (0, jsx_runtime_1.jsx)("option", { value: String(i + 1), children: mn }, i + 1))] }), (0, jsx_runtime_1.jsxs)("select", { value: day, onChange: e => onChange(year, month, e.target.value), style: selectStyle, children: [(0, jsx_runtime_1.jsx)("option", { value: "", children: "Day" }), days.map(d => (0, jsx_runtime_1.jsx)("option", { value: d, children: d }, d))] })] })] }));
 }
 function ErrorDetailModal({ row, onClose }) {
+    const navigate = (0, react_router_dom_1.useNavigate)();
     const [solutionText, setSolutionText] = (0, react_1.useState)('');
     const [savedSolution, setSavedSolution] = (0, react_1.useState)('');
     const [mode, setMode] = (0, react_1.useState)('view');
@@ -67,7 +69,7 @@ function ErrorDetailModal({ row, onClose }) {
     react_2.default.useEffect(() => {
         if (!row.error_hash)
             return;
-        fetch(`/api/error-solution/${encodeURIComponent(row.error_hash)}`)
+        (0, api_1.apiFetch)(`/api/error-solution/${encodeURIComponent(row.error_hash)}`)
             .then(r => r.json())
             .then(d => {
             if (d.solution) {
@@ -82,7 +84,7 @@ function ErrorDetailModal({ row, onClose }) {
             return;
         setSaving(true);
         try {
-            await fetch('/api/error-solution', {
+            await (0, api_1.apiFetch)('/api/error-solution', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ error_hash: row.error_hash, solution: solutionText }),
@@ -91,6 +93,9 @@ function ErrorDetailModal({ row, onClose }) {
             setMode('view');
             setResolveError('');
         }
+        catch (err) {
+            setResolveError(err instanceof api_1.ApiError ? err.label : 'Failed to save solution.');
+        }
         finally {
             setSaving(false);
         }
@@ -98,7 +103,12 @@ function ErrorDetailModal({ row, onClose }) {
     async function handleDelete() {
         if (!row.error_hash)
             return;
-        await fetch(`/api/error-solution/${encodeURIComponent(row.error_hash)}`, { method: 'DELETE' });
+        try {
+            await (0, api_1.apiFetch)(`/api/error-solution/${encodeURIComponent(row.error_hash)}`, { method: 'DELETE' });
+        }
+        catch {
+            // best-effort delete
+        }
         setSavedSolution('');
         setSolutionText('');
         setMode('view');
@@ -119,12 +129,15 @@ function ErrorDetailModal({ row, onClose }) {
             return;
         setResolving(true);
         try {
-            await fetch('/api/error-solution/resolve', {
+            await (0, api_1.apiFetch)('/api/error-solution/resolve', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ error_hash: row.error_hash, project_name: row.project }),
             });
             setResolved(true);
+        }
+        catch (err) {
+            setResolveError(err instanceof api_1.ApiError ? err.label : 'Failed to resolve error.');
         }
         finally {
             setResolving(false);
@@ -142,7 +155,7 @@ function ErrorDetailModal({ row, onClose }) {
             }, children: [(0, jsx_runtime_1.jsxs)("div", { style: {
                         display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between',
                         padding: '20px 26px', borderBottom: '1px solid var(--card-border)',
-                    }, children: [(0, jsx_runtime_1.jsxs)("div", { children: [(0, jsx_runtime_1.jsx)("div", { style: { fontSize: 16, fontWeight: 700, marginBottom: 8 }, children: "Error Detail" }), (0, jsx_runtime_1.jsxs)("div", { style: { display: 'flex', gap: 8, flexWrap: 'wrap' }, children: [(0, jsx_runtime_1.jsx)("span", { style: { fontSize: 12, padding: '3px 10px', borderRadius: 4, background: '#6366f120', color: '#818cf8', fontWeight: 700 }, children: row.project }), row.file_name && ((0, jsx_runtime_1.jsx)("span", { style: { fontSize: 12, padding: '3px 10px', borderRadius: 4, background: 'rgba(255,255,255,0.06)', color: 'var(--text-muted)', fontFamily: 'ui-monospace,monospace' }, children: row.file_name })), (0, jsx_runtime_1.jsx)("span", { style: { fontSize: 12, padding: '3px 10px', borderRadius: 4, background: 'rgba(239,68,68,0.12)', color: '#f87171', fontWeight: 700 }, children: row.error })] })] }), (0, jsx_runtime_1.jsx)("button", { onClick: onClose, style: {
+                    }, children: [(0, jsx_runtime_1.jsxs)("div", { children: [(0, jsx_runtime_1.jsx)("div", { style: { fontSize: 16, fontWeight: 700, marginBottom: 8 }, children: "Error Detail" }), (0, jsx_runtime_1.jsxs)("div", { style: { display: 'flex', gap: 8, flexWrap: 'wrap' }, children: [(0, jsx_runtime_1.jsx)("span", { style: { fontSize: 12, padding: '3px 10px', borderRadius: 4, background: '#6366f120', color: '#818cf8', fontWeight: 700 }, children: row.project }), row.file_name && ((0, jsx_runtime_1.jsx)("span", { style: { fontSize: 12, padding: '3px 10px', borderRadius: 4, background: 'rgba(255,255,255,0.06)', color: 'var(--text-muted)', fontFamily: 'ui-monospace,monospace' }, children: row.file_name })), (0, jsx_runtime_1.jsx)("span", { style: { fontSize: 12, padding: '3px 10px', borderRadius: 4, background: 'rgba(239,68,68,0.12)', color: '#f87171', fontWeight: 700 }, children: row.error }), row.error_hash && ((0, jsx_runtime_1.jsx)("button", { onClick: () => { onClose(); navigate(`/breaks/${row.error_hash}`); }, style: { fontSize: 12, padding: '3px 10px', borderRadius: 4, background: 'rgba(99,102,241,0.12)', color: '#818cf8', fontWeight: 600, border: '1px solid rgba(99,102,241,0.3)', cursor: 'pointer' }, children: "View Full Details \u2192" }))] })] }), (0, jsx_runtime_1.jsx)("button", { onClick: onClose, style: {
                                 background: 'rgba(255,255,255,0.06)', border: '1px solid var(--card-border)',
                                 color: 'var(--text-muted)', fontSize: 16, cursor: 'pointer',
                                 width: 32, height: 32, borderRadius: 8, flexShrink: 0,
@@ -231,9 +244,11 @@ function ErrorTable({ rows, emptyMsg }) {
     const [filterProject, setFilterProject] = (0, react_1.useState)('');
     const [selectedRow, setSelectedRow] = (0, react_1.useState)(null);
     const [hoveredIdx, setHoveredIdx] = (0, react_1.useState)(null);
-    const projects = Array.from(new Set(rows.map(e => e.project))).sort();
-    const filtered = filterProject ? rows.filter(e => e.project === filterProject) : rows;
-    if (rows.length === 0) {
+    const HIDDEN_PROJECTS = new Set(['document similarity matcher', 'lat', 'ai services']);
+    const visibleRows = rows.filter(e => !HIDDEN_PROJECTS.has(e.project.toLowerCase()));
+    const projects = Array.from(new Set(visibleRows.map(e => e.project))).sort();
+    const filtered = filterProject ? visibleRows.filter(e => e.project === filterProject) : visibleRows;
+    if (visibleRows.length === 0) {
         return ((0, jsx_runtime_1.jsxs)("div", { style: { textAlign: 'center', padding: '40px 0', color: 'var(--text-muted)', fontSize: 14 }, children: [(0, jsx_runtime_1.jsx)("div", { style: { fontSize: 28, marginBottom: 10 }, children: "\u2705" }), emptyMsg] }));
     }
     return ((0, jsx_runtime_1.jsxs)(jsx_runtime_1.Fragment, { children: [(0, jsx_runtime_1.jsxs)("div", { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14, flexWrap: 'wrap', gap: 10 }, children: [(0, jsx_runtime_1.jsxs)("span", { style: { fontSize: 12, color: 'var(--text-muted)' }, children: [filtered.length, " error", filtered.length !== 1 ? 's' : ''] }), (0, jsx_runtime_1.jsxs)("select", { value: filterProject, onChange: e => setFilterProject(e.target.value), style: { ...selectStyle, minWidth: 200 }, children: [(0, jsx_runtime_1.jsx)("option", { value: "", children: "All Projects" }), projects.map(p => (0, jsx_runtime_1.jsx)("option", { value: p, children: p }, p))] })] }), (0, jsx_runtime_1.jsx)("div", { style: { overflowX: 'auto' }, children: (0, jsx_runtime_1.jsxs)("table", { style: { width: '100%', borderCollapse: 'collapse', fontSize: 13 }, children: [(0, jsx_runtime_1.jsx)("thead", { children: (0, jsx_runtime_1.jsx)("tr", { style: { background: 'var(--input-bg)' }, children: ['Project', 'File', 'Error', 'Timestamp'].map(h => ((0, jsx_runtime_1.jsx)("th", { style: {
@@ -250,40 +265,14 @@ function ErrorTable({ rows, emptyMsg }) {
                                 }, children: [(0, jsx_runtime_1.jsx)("td", { style: { padding: '9px 14px', whiteSpace: 'nowrap' }, children: (0, jsx_runtime_1.jsx)("span", { style: { fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 4, background: '#6366f120', color: '#818cf8' }, children: row.project }) }), (0, jsx_runtime_1.jsx)("td", { style: { padding: '9px 14px', color: 'var(--text)', whiteSpace: 'nowrap', fontFamily: 'ui-monospace, monospace', fontSize: 12 }, children: row.file_name ?? '—' }), (0, jsx_runtime_1.jsx)("td", { style: { padding: '9px 14px', color: hoveredIdx === i ? '#fca5a5' : '#f87171', maxWidth: 320, wordBreak: 'break-word', transition: 'color 0.15s' }, children: row.error }), (0, jsx_runtime_1.jsx)("td", { style: { padding: '9px 14px', color: 'var(--text-muted)', whiteSpace: 'nowrap', fontFamily: 'ui-monospace, monospace', fontSize: 11 }, children: fmt(row.timestamp) })] }, i))) })] }) }), selectedRow && (0, jsx_runtime_1.jsx)(ErrorDetailModal, { row: selectedRow, onClose: () => setSelectedRow(null) })] }));
 }
 function Dashboard() {
-    // ── Top 10 projects ──
-    const [topProjects, setTopProjects] = (0, react_1.useState)([]);
-    const [topLoading, setTopLoading] = (0, react_1.useState)(true);
-    // ── Top 10 error projects ──
-    const [topErrorProjects, setTopErrorProjects] = (0, react_1.useState)([]);
-    const [topErrorLoading, setTopErrorLoading] = (0, react_1.useState)(true);
-    const fetchTopProjects = (0, react_1.useCallback)(() => {
-        fetch('/api/dashboard/top-projects')
-            .then(r => r.json())
-            .then(d => setTopProjects(d.projects ?? []))
-            .catch(() => { })
-            .finally(() => setTopLoading(false));
-    }, []);
-    const fetchTopErrorProjects = (0, react_1.useCallback)(() => {
-        fetch('/api/dashboard/top-error-projects')
-            .then(r => r.json())
-            .then(d => setTopErrorProjects(d.projects ?? []))
-            .catch(() => { })
-            .finally(() => setTopErrorLoading(false));
-    }, []);
-    (0, react_1.useEffect)(() => {
-        fetchTopProjects();
-        fetchTopErrorProjects();
-        const interval = setInterval(() => { fetchTopProjects(); fetchTopErrorProjects(); }, 30000);
-        return () => clearInterval(interval);
-    }, [fetchTopProjects, fetchTopErrorProjects]);
     // ── Today's errors ──
     const [todayErrors, setTodayErrors] = (0, react_1.useState)([]);
     const [todayLoading, setTodayLoading] = (0, react_1.useState)(true);
     const [todayDate, setTodayDate] = (0, react_1.useState)('');
     (0, react_1.useEffect)(() => {
-        fetch('/api/dashboard/today-errors')
+        (0, api_1.apiFetch)('/api/dashboard/today-errors')
             .then(r => r.json())
-            .then(d => { setTodayErrors(d.errors ?? []); setTodayDate(d.date ?? ''); })
+            .then((d) => { setTodayErrors(d.errors ?? []); setTodayDate(d.date ?? ''); })
             .catch(() => { })
             .finally(() => setTodayLoading(false));
     }, []);
@@ -308,7 +297,7 @@ function Dashboard() {
         setRangeLoading(true);
         setSearched(true);
         try {
-            const r = await fetch(`/api/dashboard/errors?${params}`);
+            const r = await (0, api_1.apiFetch)(`/api/dashboard/errors?${params}`);
             const d = await r.json();
             setRangeErrors(d.errors ?? []);
         }
@@ -321,33 +310,7 @@ function Dashboard() {
     }, [fromY, fromM, fromD, toY, toM, toD]);
     // Auto-fetch all errors on mount (no date filter = all data)
     (0, react_1.useEffect)(() => { fetchRange('', '', '', '', '', ''); }, []);
-    return ((0, jsx_runtime_1.jsxs)("div", { children: [(0, jsx_runtime_1.jsxs)("div", { style: { marginBottom: 24 }, children: [(0, jsx_runtime_1.jsx)("h2", { style: { fontSize: 22, fontWeight: 700, marginBottom: 4 }, children: "Dashboard" }), (0, jsx_runtime_1.jsx)("p", { style: { fontSize: 13, color: 'var(--text-muted)' }, children: "Live error monitoring across all 85 projects" })] }), (0, jsx_runtime_1.jsxs)("div", { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 18, marginBottom: 24 }, children: [(0, jsx_runtime_1.jsxs)("div", { style: card, children: [(0, jsx_runtime_1.jsx)("h3", { style: cardTitle, children: "\uD83C\uDFC6 Top 10 Most Used Projects" }), topLoading ? ((0, jsx_runtime_1.jsx)("div", { style: { textAlign: 'center', padding: '40px 0', color: 'var(--text-muted)', fontSize: 13 }, children: "Loading\u2026" })) : (() => {
-                                const colors = ['#6366f1', '#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#14b8a6', '#f97316', '#84cc16'];
-                                const chartData = topProjects.map((p, i) => ({
-                                    name: p.project_name.length > 14 ? p.project_name.slice(0, 13) + '…' : p.project_name,
-                                    fullName: p.project_name, total: Number(p.total), color: colors[i % colors.length],
-                                }));
-                                const UsedTooltip = ({ active, payload }) => {
-                                    if (!active || !payload?.length)
-                                        return null;
-                                    const d = payload[0].payload;
-                                    return ((0, jsx_runtime_1.jsxs)("div", { style: { background: '#1e293b', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, padding: '10px 14px', fontSize: 13 }, children: [(0, jsx_runtime_1.jsx)("div", { style: { color: d.color, fontWeight: 700, marginBottom: 4 }, children: d.fullName }), (0, jsx_runtime_1.jsxs)("div", { style: { color: '#94a3b8' }, children: ["Files Processed: ", (0, jsx_runtime_1.jsx)("span", { style: { color: '#fff', fontWeight: 700 }, children: d.total })] })] }));
-                                };
-                                return ((0, jsx_runtime_1.jsx)(recharts_1.ResponsiveContainer, { width: "100%", height: 300, children: (0, jsx_runtime_1.jsxs)(recharts_1.BarChart, { data: chartData, margin: { top: 20, right: 10, left: 0, bottom: 80 }, barCategoryGap: "25%", children: [(0, jsx_runtime_1.jsx)(recharts_1.CartesianGrid, { strokeDasharray: "3 3", stroke: "rgba(255,255,255,0.06)", vertical: false }), (0, jsx_runtime_1.jsx)(recharts_1.XAxis, { dataKey: "name", tick: { fill: 'rgba(255,255,255,0.5)', fontSize: 10 }, tickLine: false, axisLine: { stroke: 'rgba(255,255,255,0.08)' }, angle: -35, textAnchor: "end", interval: 0 }), (0, jsx_runtime_1.jsx)(recharts_1.YAxis, { tick: { fill: 'rgba(255,255,255,0.35)', fontSize: 10 }, tickLine: false, axisLine: false, width: 28 }), (0, jsx_runtime_1.jsx)(recharts_1.Tooltip, { content: (0, jsx_runtime_1.jsx)(UsedTooltip, {}), cursor: { fill: 'rgba(255,255,255,0.04)' } }), (0, jsx_runtime_1.jsx)(recharts_1.Bar, { dataKey: "total", radius: [6, 6, 0, 0], maxBarSize: 48, label: { position: 'top', fill: 'rgba(255,255,255,0.6)', fontSize: 10, fontWeight: 700 }, children: chartData.map((e, i) => (0, jsx_runtime_1.jsx)(recharts_1.Cell, { fill: e.color }, i)) })] }) }));
-                            })()] }), (0, jsx_runtime_1.jsxs)("div", { style: card, children: [(0, jsx_runtime_1.jsx)("h3", { style: cardTitle, children: "\uD83D\uDD34 Top 10 Error Producing Projects" }), topErrorLoading ? ((0, jsx_runtime_1.jsx)("div", { style: { textAlign: 'center', padding: '40px 0', color: 'var(--text-muted)', fontSize: 13 }, children: "Loading\u2026" })) : topErrorProjects.length === 0 ? ((0, jsx_runtime_1.jsx)("div", { style: { textAlign: 'center', padding: '40px 0', color: '#10b981', fontSize: 13 }, children: "\u2705 No errors found across all projects." })) : (() => {
-                                const errColors = ['#ef4444', '#f97316', '#f59e0b', '#ec4899', '#8b5cf6', '#6366f1', '#3b82f6', '#10b981', '#14b8a6', '#84cc16'];
-                                const chartData = topErrorProjects.map((p, i) => ({
-                                    name: p.project_name.length > 14 ? p.project_name.slice(0, 13) + '…' : p.project_name,
-                                    fullName: p.project_name, total: Number(p.total), color: errColors[i % errColors.length],
-                                }));
-                                const ErrTooltip = ({ active, payload }) => {
-                                    if (!active || !payload?.length)
-                                        return null;
-                                    const d = payload[0].payload;
-                                    return ((0, jsx_runtime_1.jsxs)("div", { style: { background: '#1e293b', border: '1px solid rgba(239,68,68,0.2)', borderRadius: 8, padding: '10px 14px', fontSize: 13 }, children: [(0, jsx_runtime_1.jsx)("div", { style: { color: d.color, fontWeight: 700, marginBottom: 4 }, children: d.fullName }), (0, jsx_runtime_1.jsxs)("div", { style: { color: '#94a3b8' }, children: ["Total Errors: ", (0, jsx_runtime_1.jsx)("span", { style: { color: '#f87171', fontWeight: 700 }, children: d.total })] })] }));
-                                };
-                                return ((0, jsx_runtime_1.jsx)(recharts_1.ResponsiveContainer, { width: "100%", height: 300, children: (0, jsx_runtime_1.jsxs)(recharts_1.BarChart, { data: chartData, margin: { top: 20, right: 10, left: 0, bottom: 80 }, barCategoryGap: "25%", children: [(0, jsx_runtime_1.jsx)(recharts_1.CartesianGrid, { strokeDasharray: "3 3", stroke: "rgba(255,255,255,0.06)", vertical: false }), (0, jsx_runtime_1.jsx)(recharts_1.XAxis, { dataKey: "name", tick: { fill: 'rgba(255,255,255,0.5)', fontSize: 10 }, tickLine: false, axisLine: { stroke: 'rgba(255,255,255,0.08)' }, angle: -35, textAnchor: "end", interval: 0 }), (0, jsx_runtime_1.jsx)(recharts_1.YAxis, { tick: { fill: 'rgba(255,255,255,0.35)', fontSize: 10 }, tickLine: false, axisLine: false, width: 28 }), (0, jsx_runtime_1.jsx)(recharts_1.Tooltip, { content: (0, jsx_runtime_1.jsx)(ErrTooltip, {}), cursor: { fill: 'rgba(255,255,255,0.04)' } }), (0, jsx_runtime_1.jsx)(recharts_1.Bar, { dataKey: "total", radius: [6, 6, 0, 0], maxBarSize: 48, label: { position: 'top', fill: 'rgba(255,255,255,0.6)', fontSize: 10, fontWeight: 700 }, children: chartData.map((e, i) => (0, jsx_runtime_1.jsx)(recharts_1.Cell, { fill: e.color }, i)) })] }) }));
-                            })()] })] }), (0, jsx_runtime_1.jsxs)("div", { style: { ...card, marginBottom: 24 }, children: [(0, jsx_runtime_1.jsxs)("div", { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }, children: [(0, jsx_runtime_1.jsx)("h3", { style: { ...cardTitle, margin: 0 }, children: "\uD83D\uDCC5 Today's Errors" }), todayDate && ((0, jsx_runtime_1.jsxs)("span", { style: {
+    return ((0, jsx_runtime_1.jsxs)("div", { children: [(0, jsx_runtime_1.jsxs)("div", { style: { marginBottom: 24 }, children: [(0, jsx_runtime_1.jsx)("h2", { style: { fontSize: 22, fontWeight: 700, marginBottom: 4 }, children: "Dashboard" }), (0, jsx_runtime_1.jsx)("p", { style: { fontSize: 13, color: 'var(--text-muted)' }, children: "Live error monitoring across all projects" })] }), (0, jsx_runtime_1.jsxs)("div", { style: { ...card, marginBottom: 24 }, children: [(0, jsx_runtime_1.jsxs)("div", { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }, children: [(0, jsx_runtime_1.jsx)("h3", { style: { ...cardTitle, margin: 0 }, children: "\uD83D\uDCC5 Today's Errors" }), todayDate && ((0, jsx_runtime_1.jsxs)("span", { style: {
                                     fontSize: 12, fontWeight: 600, padding: '3px 10px', borderRadius: 99,
                                     background: 'rgba(239,68,68,0.12)', color: '#f87171',
                                     border: '1px solid rgba(239,68,68,0.25)',
@@ -355,6 +318,6 @@ function Dashboard() {
                                     padding: '8px 24px', borderRadius: 8, fontSize: 13, fontWeight: 700,
                                     background: '#6366f1', color: '#fff', border: 'none', cursor: 'pointer',
                                     alignSelf: 'flex-end',
-                                }, children: rangeLoading ? 'Fetching…' : 'Fetch Errors' })] })] }), searched && !rangeLoading && ((0, jsx_runtime_1.jsxs)("div", { style: card, children: [(0, jsx_runtime_1.jsx)("h3", { style: cardTitle, children: "Results" }), (0, jsx_runtime_1.jsx)(ErrorTable, { rows: rangeErrors, emptyMsg: "No errors found in the selected date range." })] })), rangeLoading && ((0, jsx_runtime_1.jsx)("div", { style: { ...card, textAlign: 'center', padding: '40px 0', color: 'var(--text-muted)', fontSize: 13 }, children: "Fetching errors across all 85 projects\u2026" }))] }));
+                                }, children: rangeLoading ? 'Fetching…' : 'Fetch Errors' })] })] }), searched && !rangeLoading && ((0, jsx_runtime_1.jsxs)("div", { style: card, children: [(0, jsx_runtime_1.jsx)("h3", { style: cardTitle, children: "Results" }), (0, jsx_runtime_1.jsx)(ErrorTable, { rows: rangeErrors, emptyMsg: "No errors found in the selected date range." })] })), rangeLoading && ((0, jsx_runtime_1.jsx)("div", { style: { ...card, textAlign: 'center', padding: '40px 0', color: 'var(--text-muted)', fontSize: 13 }, children: "Fetching errors across all projects\u2026" }))] }));
 }
 //# sourceMappingURL=Dashboard.js.map

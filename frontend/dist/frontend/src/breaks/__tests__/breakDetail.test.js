@@ -46,6 +46,7 @@ afterEach(() => {
 describe('BreakDetail', () => {
     it('renders all required fields for a known break', async () => {
         global.fetch.mockResolvedValueOnce({
+            ok: true,
             status: 200,
             json: async () => mockBreak,
         });
@@ -61,6 +62,7 @@ describe('BreakDetail', () => {
     });
     it('shows correlated log entries', async () => {
         global.fetch.mockResolvedValueOnce({
+            ok: true,
             status: 200,
             json: async () => mockBreak,
         });
@@ -71,6 +73,7 @@ describe('BreakDetail', () => {
     it('shows "Data not available" placeholder for null requestPayload', async () => {
         const breakWithNulls = { ...mockBreak, requestPayload: null, userSession: null };
         global.fetch.mockResolvedValueOnce({
+            ok: true,
             status: 200,
             json: async () => breakWithNulls,
         });
@@ -80,7 +83,12 @@ describe('BreakDetail', () => {
         expect(react_1.screen.getByTestId('user-session-unavailable')).toHaveTextContent('Data not available');
     });
     it('shows not found message for 404', async () => {
-        global.fetch.mockResolvedValueOnce({ status: 404, json: async () => ({}) });
+        global.fetch.mockResolvedValueOnce({
+            ok: false,
+            status: 404,
+            statusText: 'Not Found',
+            json: async () => ({}),
+        });
         (0, react_1.render)((0, jsx_runtime_1.jsx)(BreakDetail_1.BreakDetail, { breakId: "nonexistent" }));
         await (0, react_1.waitFor)(() => expect(react_1.screen.getByTestId('break-not-found')).toBeInTheDocument());
     });

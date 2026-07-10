@@ -6,7 +6,6 @@ const NAV_LINKS = [
   { to: '/dashboard', label: 'Dashboard', icon: '▦' },
   { to: '/logs', label: 'Log Stream', icon: '≡' },
   { to: '/breaks', label: 'Breaks', icon: '⚡' },
-  { to: '/alerts', label: 'Alerts', icon: '🔔' },
   { to: '/settings', label: 'Settings', icon: '⚙' },
 ];
 

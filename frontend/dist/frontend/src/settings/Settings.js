@@ -7,6 +7,7 @@ const jsx_runtime_1 = require("react/jsx-runtime");
  * Requirements: 6.5, 9.1
  */
 const react_1 = require("react");
+const api_1 = require("../lib/api");
 const selectStyle = {
     background: 'var(--input-bg)',
     border: '1px solid var(--input-border)',
@@ -38,8 +39,8 @@ function Settings({ role }) {
             return;
         let cancelled = false;
         Promise.all([
-            fetch('/api/users').then((r) => r.json()),
-            fetch('/api/retention').then((r) => r.json()),
+            (0, api_1.apiFetch)('/api/users').then((r) => r.json()),
+            (0, api_1.apiFetch)('/api/retention').then((r) => r.json()),
         ])
             .then(([usersData, retentionData]) => {
             if (!cancelled) {

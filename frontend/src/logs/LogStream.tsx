@@ -455,11 +455,16 @@ export function LogStream() {
     const params = activeCategory !== 'All' ? `?category=${encodeURIComponent(activeCategory)}` : '';
     apiFetch(`/api/projects${params}`)
       .then((r) => r.json())
-      .then((data) => { setProjects(data as Project[]); setLoading(false); })
+      .then((data) => { 
+        const filtered = (data as Project[]).filter((p) => p.name !== 'document_similarity_matcher');
+        setProjects(filtered); 
+        setLoading(false); 
+      })
       .catch(() => setLoading(false));
   }, [activeCategory]);
 
-  const filtered = projects.filter((p) => p.name.toLowerCase().includes(search.toLowerCase()));
+  const HIDDEN = new Set(['document_similarity_matcher', 'lat', 'ai services']);
+  const filtered = projects.filter((p) => p.name.toLowerCase().includes(search.toLowerCase()) && !HIDDEN.has(p.name.toLowerCase()));
 
   return (
     <div data-testid="log-stream">

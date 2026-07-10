@@ -7,6 +7,7 @@ const jsx_runtime_1 = require("react/jsx-runtime");
  * Requirements: 4.1, 4.2, 4.3, 4.4
  */
 const react_1 = require("react");
+const api_1 = require("../lib/api");
 function BreakDetail({ breakId }) {
     const [data, setData] = (0, react_1.useState)(null);
     const [loading, setLoading] = (0, react_1.useState)(true);
@@ -14,15 +15,8 @@ function BreakDetail({ breakId }) {
     (0, react_1.useEffect)(() => {
         let cancelled = false;
         setLoading(true);
-        fetch(`/api/breaks/${breakId}`)
-            .then((r) => {
-            if (r.status === 404) {
-                if (!cancelled)
-                    setNotFound(true);
-                return null;
-            }
-            return r.json();
-        })
+        (0, api_1.apiFetch)(`/api/breaks/${breakId}`)
+            .then((r) => r.json())
             .then((d) => {
             if (!cancelled && d) {
                 setData(d);
@@ -31,8 +25,15 @@ function BreakDetail({ breakId }) {
             else if (!cancelled)
                 setLoading(false);
         })
-            .catch(() => { if (!cancelled)
-            setLoading(false); });
+            .catch((err) => {
+            if (!cancelled) {
+                // 404 from ApiError means the break doesn't exist
+                if (err && typeof err === 'object' && 'status' in err && err.status === 404) {
+                    setNotFound(true);
+                }
+                setLoading(false);
+            }
+        });
         return () => { cancelled = true; };
     }, [breakId]);
     if (loading)

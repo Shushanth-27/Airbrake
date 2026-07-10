@@ -423,10 +423,12 @@ function ErrorTable({ rows, emptyMsg }: { rows: ErrorRow[]; emptyMsg: string }) 
   const [filterProject, setFilterProject] = useState('');
   const [selectedRow, setSelectedRow] = useState<ErrorRow | null>(null);
   const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
-  const projects = Array.from(new Set(rows.map(e => e.project))).sort();
-  const filtered = filterProject ? rows.filter(e => e.project === filterProject) : rows;
+  const HIDDEN_PROJECTS = new Set(['document similarity matcher', 'lat', 'ai services']);
+  const visibleRows = rows.filter(e => !HIDDEN_PROJECTS.has(e.project.toLowerCase()));
+  const projects = Array.from(new Set(visibleRows.map(e => e.project))).sort();
+  const filtered = filterProject ? visibleRows.filter(e => e.project === filterProject) : visibleRows;
 
-  if (rows.length === 0) {
+  if (visibleRows.length === 0) {
     return (
       <div style={{ textAlign: 'center', padding: '40px 0', color: 'var(--text-muted)', fontSize: 14 }}>
         <div style={{ fontSize: 28, marginBottom: 10 }}>✅</div>
@@ -510,7 +512,7 @@ export function Dashboard() {
   const fetchTopProjects = useCallback(() => {
     apiFetch('/api/dashboard/top-projects')
       .then(r => r.json())
-      .then((d: any) => setTopProjects(d.projects ?? []))
+      .then((d: any) => setTopProjects((d.projects ?? []).filter((p: any) => !['lat', 'ai services', 'document similarity matcher'].includes(p.project_name?.toLowerCase()))))
       .catch(() => {})
       .finally(() => setTopLoading(false));
   }, []);
@@ -518,7 +520,7 @@ export function Dashboard() {
   const fetchTopErrorProjects = useCallback(() => {
     apiFetch('/api/dashboard/top-error-projects')
       .then(r => r.json())
-      .then((d: any) => setTopErrorProjects(d.projects ?? []))
+      .then((d: any) => setTopErrorProjects((d.projects ?? []).filter((p: any) => !['lat', 'ai services', 'document similarity matcher'].includes(p.project_name?.toLowerCase()))))
       .catch(() => {})
       .finally(() => setTopErrorLoading(false));
   }, []);

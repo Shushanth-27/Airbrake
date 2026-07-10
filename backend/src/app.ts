@@ -449,8 +449,8 @@ app.get('/api/projects', async (req: any, res: any) => {
     if (tableExists.length > 0) {
       // Projects registry exists — use it (richer data: id, name, category)
       const { rows } = category
-        ? await pool.query('SELECT id, name, category FROM projects WHERE category = $1 ORDER BY name', [category])
-        : await pool.query('SELECT id, name, category FROM projects ORDER BY name');
+        ? await pool.query('SELECT id, name, category FROM projects WHERE category = $1 AND name != $2 ORDER BY name', [category, 'document_similarity_matcher'])
+        : await pool.query('SELECT id, name, category FROM projects WHERE name != $1 ORDER BY name', ['document_similarity_matcher']);
       return res.json(rows);
     }
 
@@ -460,7 +460,7 @@ app.get('/api/projects', async (req: any, res: any) => {
     const SYSTEM_TABLES = [
       'alert_rules','alert_history','users','projects','saved_filters',
       'retention_policies','parse_errors','audit_log','break_groups',
-      'breaks','error_solutions',
+      'breaks','error_solutions','document_similarity_matcher',
     ];
     const exclude = SYSTEM_TABLES.map((_, i) => `$${i + 1}`).join(',');
     const { rows: tables } = await pool.query(`
