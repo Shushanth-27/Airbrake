@@ -210,7 +210,16 @@ export function BreaksList() {
                   </tr>
                 ) : (result?.data ?? []).map((b, i) => (
                   <tr key={i} data-testid="break-item" data-status={b.status}
-                    onClick={() => navigate(`/breaks/${b.error_hash}`)}
+                    onClick={() => navigate(`/breaks/${b.error_hash}?project_name=${encodeURIComponent(b.project_name)}`, {
+                      state: {
+                        project: b.project_name,
+                        file_name: null,
+                        error: b.error_message,
+                        error_hash: b.error_hash,
+                        error_detail: null,
+                        timestamp: b.first_seen,
+                      },
+                    })}
                     style={{ borderBottom: '1px solid var(--card-border)', background: i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.01)', cursor: 'pointer' }}>
                     <td style={{ padding: '11px 16px', whiteSpace: 'nowrap' }}>
                       <span style={{

@@ -316,7 +316,107 @@ def _insert_result(project_name, file_name, error, error_detail,
     )
 
 
+def _to_int(value):
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(float(value))
+        except ValueError:
+            return None
+    return None
+
+
+def _to_float(value):
+    if isinstance(value, (float, int)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _lookup_usage_field(source, keys):
+    if not isinstance(source, dict):
+        return None
+    for key in keys:
+        if key in source:
+            return source[key]
+    return None
+
+
+def _normalize_usage(source):
+    if not isinstance(source, dict):
+        return {}
+
+    data = {}
+    # Token counts
+    data["input_tokens"] = _to_int(_lookup_usage_field(source, ["prompt_tokens", "input_tokens", "input", "input_token_count", "tokens_in", "promptTokenCount"]))
+    data["output_tokens"] = _to_int(_lookup_usage_field(source, ["completion_tokens", "output_tokens", "output", "output_token_count", "tokens_out", "completionTokenCount"]))
+    data["calculated_cost"] = _to_float(_lookup_usage_field(source, ["cost", "total_cost", "usd_cost", "price", "estimated_cost", "currency_cost"]))
+    data["llm_usage"] = source.get("llm_usage") or source.get("provider") or source.get("model")
+    return data
+
+
+def _extract_usage(body):
+    if not isinstance(body, dict):
+        return {}
+
+    extracted = {
+        "input_tokens": None,
+        "output_tokens": None,
+        "calculated_cost": None,
+        "llm_usage": None,
+    }
+
+    # Direct values first
+    extracted["input_tokens"] = _to_int(body.get("input_tokens"))
+    extracted["output_tokens"] = _to_int(body.get("output_tokens"))
+    extracted["calculated_cost"] = _to_float(body.get("calculated_cost"))
+    extracted["llm_usage"] = body.get("llm_usage") or body.get("model") or body.get("provider")
+
+    candidates = []
+    if isinstance(body.get("usage"), dict):
+        candidates.append(body["usage"])
+    elif isinstance(body.get("usage"), str):
+        try:
+            parsed = json.loads(body["usage"])
+            if isinstance(parsed, dict):
+                candidates.append(parsed)
+        except Exception:
+            pass
+
+    for key in ("response", "result", "data", "metadata", "response_metadata", "output", "completion"):
+        value = body.get(key)
+        if isinstance(value, dict):
+            candidates.append(value)
+            if isinstance(value.get("usage"), dict):
+                candidates.append(value["usage"])
+
+    for source in candidates:
+        if extracted["input_tokens"] is None:
+            extracted["input_tokens"] = _normalize_usage(source).get("input_tokens")
+        if extracted["output_tokens"] is None:
+            extracted["output_tokens"] = _normalize_usage(source).get("output_tokens")
+        if extracted["calculated_cost"] is None:
+            extracted["calculated_cost"] = _normalize_usage(source).get("calculated_cost")
+        if extracted["llm_usage"] is None:
+            extracted["llm_usage"] = _normalize_usage(source).get("llm_usage")
+
+    if extracted["input_tokens"] is None and extracted["output_tokens"] is None:
+        total_tokens = _to_int(_lookup_usage_field(body, ["total_tokens", "tokens", "total"]))
+        if total_tokens is not None:
+            extracted["input_tokens"] = total_tokens
+
+    return extracted
+
+
 def _parse_optional(body):
+    extracted = _extract_usage(body)
     return {
         "file_name":       body.get("file_name") or None,
         "error_detail":    body.get("error_detail") or None,
@@ -324,10 +424,10 @@ def _parse_optional(body):
         "failure_count":   body.get("failure_count", 1),
         "word_count":      body.get("word_count"),
         "file_type":       body.get("file_type"),
-        "input_tokens":    body.get("input_tokens"),
-        "output_tokens":   body.get("output_tokens"),
-        "calculated_cost": body.get("calculated_cost"),
-        "llm_usage":       body.get("llm_usage"),
+        "input_tokens":    body.get("input_tokens") if body.get("input_tokens") is not None else extracted.get("input_tokens"),
+        "output_tokens":   body.get("output_tokens") if body.get("output_tokens") is not None else extracted.get("output_tokens"),
+        "calculated_cost": body.get("calculated_cost") if body.get("calculated_cost") is not None else extracted.get("calculated_cost"),
+        "llm_usage":       body.get("llm_usage") or extracted.get("llm_usage"),
     }
 
 
@@ -658,14 +758,26 @@ def get_break_detail(error_hash):
       - Saved solution (if any)
     """
     try:
+        project_name = (request.args.get('project_name') or '').strip() or None
+
         # Get grouped error info
+        conditions = [
+            "(error_hash = %s OR MD5(LOWER(TRIM(error))) = %s)",
+            "error IS NOT NULL",
+            "error <> ''",
+        ]
+        params = [error_hash, error_hash]
+        if project_name:
+            conditions.insert(0, "LOWER(project_name) = LOWER(%s)")
+            params.insert(0, project_name)
+
         error_rows = query(
             "SELECT project_name, error AS error_message, error_detail, error_hash, "
             "failure_count, timestamp, error_status, reopened_at, file_name "
             "FROM project_results "
-            "WHERE error_hash = %s AND error IS NOT NULL AND error <> '' "
+            f"WHERE {' AND '.join(conditions)} "
             "ORDER BY timestamp DESC",
-            (error_hash,),
+            tuple(params),
         )
         if not error_rows:
             return jsonify({"error": "Not Found", "message": "Error not found."}), 404
@@ -674,6 +786,7 @@ def get_break_detail(error_hash):
         occurrence_count = sum(r.get("failure_count", 1) for r in error_rows)
         first_seen = min(r["timestamp"] for r in error_rows if r.get("timestamp"))
         last_seen = max(r.get("reopened_at") or r["timestamp"] for r in error_rows if r.get("timestamp"))
+        file_name = next((r.get("file_name") for r in error_rows if r.get("file_name")), first.get("file_name"))
 
         has_reopened = any(r.get("error_status") == "reopened" for r in error_rows)
         if has_reopened:
@@ -688,27 +801,48 @@ def get_break_detail(error_hash):
             for r in error_rows
         ]
 
-        # Get saved solution
+        # Get latest solution from knowledge_base
+        solution_conditions = [
+            "(pr.error_hash = %s OR MD5(LOWER(TRIM(pr.error))) = %s)"
+        ]
+        solution_params = [error_hash, error_hash]
+        if project_name:
+            solution_conditions.insert(0, "LOWER(pr.project_name) = LOWER(%s)")
+            solution_params.insert(0, project_name)
+
         solution_rows = query(
-            "SELECT solution, updated_at FROM error_solutions WHERE error_hash = %s",
-            (error_hash,),
+            f"""
+            SELECT kb.solution,
+                kb.created_at,
+                kb.created_by
+            FROM knowledge_base kb
+            JOIN project_results pr
+            ON kb.project_result_id = pr.id
+            WHERE {' AND '.join(solution_conditions)}
+            ORDER BY kb.created_at DESC
+            LIMIT 1
+            """,
+            tuple(solution_params),
         )
+
         solution_data = None
+
         if solution_rows:
             s = solution_rows[0]
             solution_data = {
                 "solution": s["solution"],
-                "updated_at": s["updated_at"].isoformat() if s.get("updated_at") else None,
+                "created_at": s["created_at"].isoformat() if s.get("created_at") else None,
+                "created_by": s.get("created_by"),
             }
 
         result = {
             "project_name": first["project_name"],
+            "file_name": file_name,
             "error_message": first["error_message"],
             "error_detail": first.get("error_detail"),
             "error_hash": error_hash,
             "occurrence_count": occurrence_count,
             "first_seen": first_seen,
-            "last_seen": last_seen,
             "status": status,
             "occurrences": serialize_rows(occurrences),
             "solution": solution_data,
@@ -873,7 +1007,7 @@ def get_alert_history():
 # ERROR SOLUTIONS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@app.route("/api/error-solution/resolve", methods=["POST"])
+@app.route("/api/knowledge_base/resolve", methods=["POST"])
 def resolve_error_solution():
     body = request.get_json() or {}
     error_hash = body.get("error_hash")
@@ -888,58 +1022,106 @@ def resolve_error_solution():
             (error_hash, project_name),
         )
         return jsonify({"resolved": count, "project_name": project_name, "error_hash": error_hash})
-    except Exception:
-        return jsonify({"error": "Internal server error"}), 500
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
 
 
-@app.route("/api/error-solution/<error_hash>", methods=["GET"])
+@app.route("/api/knowledge_base/<error_hash>", methods=["GET"])
 def get_error_solution(error_hash):
     try:
         rows = query(
-            "SELECT solution, updated_at FROM error_solutions WHERE error_hash = %s",
-            (error_hash,),
+        """
+        SELECT kb.solution, kb.created_at
+        FROM knowledge_base kb
+        JOIN project_results pr
+            ON kb.project_result_id = pr.id
+        WHERE pr.error_hash = %s
+        ORDER BY kb.created_at DESC
+        LIMIT 1
+        """,
+        (error_hash,),
         )
         if not rows:
             return jsonify({"solution": None})
         r = rows[0]
         return jsonify({
             "solution": r["solution"],
-            "updated_at": r["updated_at"].isoformat() if r.get("updated_at") else None,
+            "updated_at": r["created_at"].isoformat() if r.get("created_at") else None,
         })
     except Exception:
         return jsonify({"error": "Internal server error"}), 500
 
 
-@app.route("/api/error-solution", methods=["POST"])
+@app.route("/api/knowledge_base", methods=["POST"])
 def upsert_error_solution():
     body = request.get_json() or {}
     error_hash = body.get("error_hash")
     solution = body.get("solution")
+    created_by = body.get("created_by") or "developer"
     if not error_hash:
         return jsonify({"error": "error_hash is required"}), 400
+    if not solution:
+        return jsonify({"error": "solution is required"}), 400
     try:
-        count = execute(
-            "UPDATE error_solutions SET solution = %s, updated_at = NOW() WHERE error_hash = %s",
-            (solution, error_hash),
+        project = query(
+            """
+            SELECT id
+            FROM project_results
+            WHERE error_hash = %s
+            LIMIT 1
+            """,
+            (error_hash,),
         )
-        if count > 0:
-            row = query("SELECT * FROM error_solutions WHERE error_hash = %s", (error_hash,))[0]
-        else:
-            row = execute_returning(
-                "INSERT INTO error_solutions (id, error_hash, solution) VALUES (%s,%s,%s) RETURNING *",
-                (str(uuid.uuid4()), error_hash, solution),
+        if not project:
+            return jsonify({"error": "No matching project_result found"}), 404
+        project_result_id = project[0]["id"]
+        row = execute_returning(
+            """
+            INSERT INTO knowledge_base
+            (
+                id,
+                project_result_id,
+                solution,
+                created_by,
+                created_at
             )
-        return jsonify(serialize_row(row))
-    except Exception:
-        return jsonify({"error": "Internal server error"}), 500
+            VALUES
+            (
+                %s,
+                %s,
+                %s,
+                %s,
+                NOW()
+            )
+            RETURNING *
+            """,
+            (
+                str(uuid.uuid4()),
+                project_result_id,
+                solution,
+                created_by,
+            ),
+        )
+        return jsonify(serialize_row(row)), 201
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
-@app.route("/api/error-solution/<error_hash>", methods=["DELETE"])
+@app.route("/api/knowledge_base/<error_hash>", methods=["DELETE"])
 def delete_error_solution(error_hash):
     try:
-        execute("DELETE FROM error_solutions WHERE error_hash = %s", (error_hash,))
+        execute(
+            "DELETE FROM knowledge_base "
+            "WHERE project_result_id IN ("
+            "  SELECT id FROM project_results WHERE error_hash = %s"
+            ")",
+            (error_hash,),
+        )
         return make_response("", 204)
-    except Exception:
+    except Exception as e:
+        print(f"[Knowledge Base] delete error: {e}")
         return jsonify({"error": "Internal server error"}), 500
 
 
