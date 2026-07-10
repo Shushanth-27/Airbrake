@@ -33,7 +33,7 @@ async function getProjectTables(pool) {
   `);
     const hasIsLive = colCheck[0]?.exists === true;
     const liveFilter = hasIsLive
-        ? `AND REPLACE(c.table_name, '_', ' ') IN (SELECT name FROM projects WHERE is_live = true AND name != 'document_similarity_matcher')`
+        ? `AND REPLACE(c.table_name, '_', ' ') IN (SELECT name FROM projects WHERE is_live = true)`
         : `AND c.table_name IN (
         'tand_f_rubriq_processing',
         'language_quality_score'
@@ -49,7 +49,7 @@ async function getProjectTables(pool) {
         'alert_rules', 'alert_history', 'users', 'projects',
         'saved_filters', 'retention_policies', 'parse_errors',
         'audit_log', 'break_groups', 'breaks', 'error_solutions',
-        'Image_Forensics', 'document_similarity_matcher'
+        'Image_Forensics'
       )
       -- must have error_status column
       AND c.table_name IN (
@@ -65,9 +65,7 @@ async function getProjectTables(pool) {
       ${liveFilter}
     ORDER BY c.table_name
   `);
-    return rows
-        .map((r) => r.table_name)
-        .filter((t) => t.toLowerCase() !== 'document_similarity_matcher');
+    return rows.map((r) => r.table_name);
 }
 /**
  * Builds a UNION ALL query across all project tables selecting

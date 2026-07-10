@@ -457,14 +457,29 @@ def ingest_success():
 
 @app.route("/api/dashboard/top-projects")
 def dashboard_top_projects():
+    from_ts = request.args.get("from", "")
+    to_ts = request.args.get("to", "")
     try:
-        rows = query("""
+        conditions = []
+        params = []
+        if from_ts:
+            conditions.append("pr.timestamp >= %s")
+            params.append(from_ts)
+        if to_ts:
+            conditions.append("pr.timestamp <= %s")
+            params.append(to_ts)
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+        rows = query(
+            f"""
             SELECT pr.project_name, CAST(COUNT(*) AS int) AS total
             FROM project_results pr
             JOIN projects p ON LOWER(p.name) = LOWER(pr.project_name)
+            {where}
             GROUP BY pr.project_name
             ORDER BY total DESC LIMIT 10
-        """)
+            """,
+            params if params else None,
+        )
         return jsonify({"projects": serialize_rows(rows)})
     except Exception as e:
         print(f"[Dashboard] top-projects: {e}")
@@ -473,17 +488,33 @@ def dashboard_top_projects():
 
 @app.route("/api/dashboard/top-error-projects")
 def dashboard_top_error_projects():
+    from_ts = request.args.get("from", "")
+    to_ts = request.args.get("to", "")
     try:
-        rows = query("""
+        conditions = [
+            "pr.error IS NOT NULL", "pr.error <> ''",
+            "pr.error_status IN ('open', 'reopened')",
+        ]
+        params = []
+        if from_ts:
+            conditions.append("pr.timestamp >= %s")
+            params.append(from_ts)
+        if to_ts:
+            conditions.append("pr.timestamp <= %s")
+            params.append(to_ts)
+        where = "WHERE " + " AND ".join(conditions)
+        rows = query(
+            f"""
             SELECT pr.project_name, CAST(COUNT(*) AS int) AS total
             FROM project_results pr
             JOIN projects p ON LOWER(p.name) = LOWER(pr.project_name)
-            WHERE pr.error IS NOT NULL AND pr.error <> ''
-              AND pr.error_status IN ('open', 'reopened')
+            {where}
             GROUP BY pr.project_name
             HAVING COUNT(*) > 0
             ORDER BY total DESC LIMIT 10
-        """)
+            """,
+            params if params else None,
+        )
         return jsonify({"projects": serialize_rows(rows)})
     except Exception as e:
         print(f"[Dashboard] top-error-projects: {e}")

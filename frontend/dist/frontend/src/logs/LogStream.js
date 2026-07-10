@@ -186,14 +186,12 @@ function LogStream() {
         (0, api_1.apiFetch)(`/api/projects${params}`)
             .then((r) => r.json())
             .then((data) => {
-            const filtered = data.filter((p) => p.name !== 'document_similarity_matcher');
-            setProjects(filtered);
+            setProjects(data);
             setLoading(false);
         })
             .catch(() => setLoading(false));
     }, [activeCategory]);
-    const HIDDEN = new Set(['document_similarity_matcher', 'lat', 'ai services']);
-    const filtered = projects.filter((p) => p.name.toLowerCase().includes(search.toLowerCase()) && !HIDDEN.has(p.name.toLowerCase()));
+    const filtered = projects.filter((p) => p.name.toLowerCase().includes(search.toLowerCase()));
     return ((0, jsx_runtime_1.jsxs)("div", { "data-testid": "log-stream", children: [(0, jsx_runtime_1.jsxs)("div", { style: { marginBottom: 20 }, children: [(0, jsx_runtime_1.jsx)("h2", { style: { fontSize: 22, fontWeight: 700, marginBottom: 4 }, children: "AI Services" }), (0, jsx_runtime_1.jsx)("p", { style: { fontSize: 13, color: 'var(--text-muted)' }, children: "All projects at a glance \u2014 click a tile to view data" })] }), (0, jsx_runtime_1.jsx)("div", { style: { display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 16 }, children: CATEGORIES.map((cat) => {
                     const active = activeCategory === cat;
                     const color = CATEGORY_COLOR[cat] ?? '#6366f1';

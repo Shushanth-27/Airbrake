@@ -456,15 +456,13 @@ export function LogStream() {
     apiFetch(`/api/projects${params}`)
       .then((r) => r.json())
       .then((data) => { 
-        const filtered = (data as Project[]).filter((p) => p.name !== 'document_similarity_matcher');
-        setProjects(filtered); 
+        setProjects(data as Project[]); 
         setLoading(false); 
       })
       .catch(() => setLoading(false));
   }, [activeCategory]);
 
-  const HIDDEN = new Set(['document_similarity_matcher', 'lat', 'ai services']);
-  const filtered = projects.filter((p) => p.name.toLowerCase().includes(search.toLowerCase()) && !HIDDEN.has(p.name.toLowerCase()));
+  const filtered = projects.filter((p) => p.name.toLowerCase().includes(search.toLowerCase()));
 
   return (
     <div data-testid="log-stream">
