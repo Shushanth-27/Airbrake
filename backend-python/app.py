@@ -2,9 +2,14 @@
 Flask application — all API routes.
 Shared between the Lambda handler (lambda_function.py) and local dev.
 
-Architecture: Single-table design
-  - projects        → project metadata (id, name, category, is_live)
-  - project_results → all logs/errors/results from ALL projects
+Architecture: Single-table design using DSQL table 'project_data'
+  - row_type = 'project'    → project metadata (name, category, is_live)
+  - row_type = 'log'        → all logs/errors/results from ALL projects
+  - row_type = 'solution'   → error solutions
+  - row_type = 'alert_rule' → alert rule definitions
+  - row_type = 'alert_history' → triggered alert records
+  - row_type = 'user'       → user accounts
+  - row_type = 'retention'  → retention policies
 """
 
 import os
@@ -21,12 +26,16 @@ from teams import send_teams_alert, test_teams_webhook
 app = Flask(__name__)
 app.config["JSON_SORT_KEYS"] = False
 
+# The single DSQL table used for ALL data
+TABLE = "projects_data"
+
 # ── CORS ──────────────────────────────────────────────────────────────────────
 ALLOWED_ORIGINS = {
     "http://airbrake.s3-website-us-east-1.amazonaws.com",
     "http://localhost:3000",
     "http://localhost:3001",
 }
+
 
 #new version check
 @app.after_request
@@ -100,8 +109,10 @@ def health_teams():
 
 @app.route("/api/debug/project-tables")
 def debug_project_tables():
-    """Debug endpoint — lists all projects from the projects table."""
-    rows = query("SELECT name FROM projects ORDER BY name")
+    """Debug endpoint — lists all projects from project_data."""
+    rows = query(
+        f"SELECT project_name AS name FROM {TABLE} WHERE row_type = 'project' ORDER BY project_name"
+    )
     names = [r["name"] for r in rows]
     return jsonify({"tables": names, "count": len(names)})
 
@@ -116,11 +127,15 @@ def list_projects():
     try:
         if category:
             rows = query(
-                "SELECT id, name, category FROM projects WHERE category = %s ORDER BY name",
+                f"SELECT id, project_name AS name, category FROM {TABLE} "
+                f"WHERE row_type = 'project' AND category = %s ORDER BY project_name",
                 (category,),
             )
         else:
-            rows = query("SELECT id, name, category FROM projects ORDER BY name")
+            rows = query(
+                f"SELECT id, project_name AS name, category FROM {TABLE} "
+                f"WHERE row_type = 'project' ORDER BY project_name"
+            )
         return jsonify(serialize_rows(rows))
     except Exception as e:
         print(f"[Projects] error: {e}")
@@ -131,7 +146,8 @@ def list_projects():
 def list_live_projects():
     try:
         rows = query(
-            "SELECT id, name, category, is_live FROM projects WHERE is_live = true ORDER BY name"
+            f"SELECT id, project_name AS name, category, is_live FROM {TABLE} "
+            f"WHERE row_type = 'project' AND is_live = true ORDER BY project_name"
         )
         return jsonify(serialize_rows(rows))
     except Exception as e:
@@ -144,7 +160,8 @@ def project_logs(name):
     try:
         # Check if project exists
         proj = query(
-            "SELECT name FROM projects WHERE LOWER(name) = LOWER(%s)",
+            f"SELECT project_name AS name FROM {TABLE} "
+            f"WHERE row_type = 'project' AND LOWER(project_name) = LOWER(%s)",
             (project_name,),
         )
         if not proj:
@@ -156,11 +173,11 @@ def project_logs(name):
 
         actual_name = proj[0]["name"]
         logs = query(
-            "SELECT file_name, timestamp, success_count, failure_count, error, "
-            "llm_usage, input_tokens, output_tokens, calculated_cost, word_count, file_type, "
-            "error_status, resolved_at, reopened_at "
-            "FROM project_results WHERE LOWER(project_name) = LOWER(%s) "
-            "ORDER BY timestamp DESC LIMIT 500",
+            f"SELECT file_name, timestamp, success_count, failure_count, error, "
+            f"llm_usage, input_tokens, output_tokens, calculated_cost, word_count, file_type, "
+            f"error_status, resolved_at, reopened_at "
+            f"FROM {TABLE} WHERE row_type = 'log' AND LOWER(project_name) = LOWER(%s) "
+            f"ORDER BY timestamp DESC LIMIT 500",
             (actual_name,),
         )
         total = len(logs)
@@ -196,7 +213,8 @@ def upsert_project_error(name):
     try:
         # Verify project exists
         proj = query(
-            "SELECT name FROM projects WHERE LOWER(name) = LOWER(%s)",
+            f"SELECT project_name AS name FROM {TABLE} "
+            f"WHERE row_type = 'project' AND LOWER(project_name) = LOWER(%s)",
             (project_name,),
         )
         if not proj:
@@ -222,13 +240,13 @@ def upsert_project_error(name):
 
         # Try to update existing row with same error_hash
         updated = execute_returning(
-            "UPDATE project_results SET failure_count = failure_count + 1, file_name = %s, "
-            "timestamp = NOW(), error_detail = COALESCE(%s, error_detail), "
-            "error_status = CASE WHEN error_status = 'resolved' THEN 'reopened' ELSE error_status END, "
-            "reopened_at = CASE WHEN error_status = 'resolved' THEN NOW() ELSE reopened_at END, "
-            "resolved_at = CASE WHEN error_status = 'resolved' THEN NULL ELSE resolved_at END "
-            "WHERE error_hash = %s AND LOWER(project_name) = LOWER(%s) "
-            "RETURNING id, error_status, failure_count",
+            f"UPDATE {TABLE} SET failure_count = failure_count + 1, file_name = %s, "
+            f"timestamp = NOW(), error_detail = COALESCE(%s, error_detail), "
+            f"error_status = CASE WHEN error_status = 'resolved' THEN 'reopened' ELSE error_status END, "
+            f"reopened_at = CASE WHEN error_status = 'resolved' THEN NOW() ELSE reopened_at END, "
+            f"resolved_at = CASE WHEN error_status = 'resolved' THEN NULL ELSE resolved_at END "
+            f"WHERE row_type = 'log' AND error_hash = %s AND LOWER(project_name) = LOWER(%s) "
+            f"RETURNING id, error_status, failure_count",
             (file_name, error_detail, error_hash, actual_name),
         )
         if updated:
@@ -238,10 +256,10 @@ def upsert_project_error(name):
 
         # Insert new error row
         inserted = execute_returning(
-            "INSERT INTO project_results (id, project_name, file_name, timestamp, "
-            "success_count, failure_count, error, error_detail, error_hash, error_status) "
-            "VALUES (%s, %s, %s, NOW(), 0, 1, %s, %s, %s, 'open') "
-            "RETURNING id, error_status, failure_count",
+            f"INSERT INTO {TABLE} (id, row_type, project_name, file_name, timestamp, "
+            f"success_count, failure_count, error, error_detail, error_hash, error_status) "
+            f"VALUES (%s, 'log', %s, %s, NOW(), 0, 1, %s, %s, %s, 'open') "
+            f"RETURNING id, error_status, failure_count",
             (str(uuid.uuid4()), actual_name, file_name, short_error, error_detail, error_hash),
         )
         return jsonify({"action": "inserted", "error_status": inserted["error_status"],
@@ -255,15 +273,17 @@ def upsert_project_error(name):
 def resolve_project_error(name, hash):
     try:
         proj = query(
-            "SELECT name FROM projects WHERE LOWER(name) = LOWER(%s)",
+            f"SELECT project_name AS name FROM {TABLE} "
+            f"WHERE row_type = 'project' AND LOWER(project_name) = LOWER(%s)",
             (name,),
         )
         if not proj:
             return jsonify({"error": f"No project found: {name}"}), 404
         actual_name = proj[0]["name"]
         execute(
-            "UPDATE project_results SET error_status = %s, resolved_at = NOW(), "
-            "reopened_at = NULL WHERE error_hash = %s AND LOWER(project_name) = LOWER(%s)",
+            f"UPDATE {TABLE} SET error_status = %s, resolved_at = NOW(), "
+            f"reopened_at = NULL WHERE row_type = 'log' AND error_hash = %s "
+            f"AND LOWER(project_name) = LOWER(%s)",
             ("resolved", hash, actual_name),
         )
         return jsonify({"action": "resolved"})
@@ -279,8 +299,9 @@ def toggle_project_live(name):
         return jsonify({"error": "Body must contain { is_live: true | false }"}), 400
     try:
         row = execute_returning(
-            "UPDATE projects SET is_live = %s WHERE LOWER(name) = LOWER(%s) "
-            "RETURNING id, name, category, is_live",
+            f"UPDATE {TABLE} SET is_live = %s "
+            f"WHERE row_type = 'project' AND LOWER(project_name) = LOWER(%s) "
+            f"RETURNING id, project_name AS name, category, is_live",
             (is_live, name),
         )
         if not row:
@@ -298,16 +319,16 @@ def _insert_result(project_name, file_name, error, error_detail,
                    error_hash, error_status, success_count, failure_count,
                    word_count, file_type, input_tokens, output_tokens,
                    calculated_cost, llm_usage):
-    """Insert a row into project_results and return it."""
+    """Insert a log row into project_data and return it."""
     row_id = str(uuid.uuid4())
     return execute_returning(
-        "INSERT INTO project_results ("
-        "id, project_name, file_name, timestamp, "
-        "success_count, failure_count, error, error_detail, error_hash, error_status, "
-        "word_count, file_type, input_tokens, output_tokens, calculated_cost, llm_usage"
-        ") VALUES (%s,%s,%s,NOW(),%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
-        "RETURNING id, project_name, file_name, error, error_detail, "
-        "error_hash, error_status, success_count, failure_count, timestamp",
+        f"INSERT INTO {TABLE} ("
+        f"id, row_type, project_name, file_name, timestamp, "
+        f"success_count, failure_count, error, error_detail, error_hash, error_status, "
+        f"word_count, file_type, input_tokens, output_tokens, calculated_cost, llm_usage"
+        f") VALUES (%s,'log',%s,%s,NOW(),%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+        f"RETURNING id, project_name, file_name, error, error_detail, "
+        f"error_hash, error_status, success_count, failure_count, timestamp",
         (row_id, project_name, file_name,
          success_count, failure_count, error, error_detail,
          error_hash, error_status,
@@ -434,7 +455,8 @@ def _parse_optional(body):
 def _validate_project(project_name):
     """Return actual project name if found, else None."""
     rows = query(
-        "SELECT name FROM projects WHERE LOWER(name) = LOWER(%s)",
+        f"SELECT project_name AS name FROM {TABLE} "
+        f"WHERE row_type = 'project' AND LOWER(project_name) = LOWER(%s)",
         (project_name,),
     )
     return rows[0]["name"] if rows else None
@@ -560,24 +582,19 @@ def dashboard_top_projects():
     from_ts = request.args.get("from", "")
     to_ts = request.args.get("to", "")
     try:
-        conditions = []
+        conditions = ["row_type = 'log'"]
         params = []
         if from_ts:
-            conditions.append("pr.timestamp >= %s")
+            conditions.append("timestamp >= %s")
             params.append(from_ts)
         if to_ts:
-            conditions.append("pr.timestamp <= %s")
+            conditions.append("timestamp <= %s")
             params.append(to_ts)
-        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+        where = "WHERE " + " AND ".join(conditions)
         rows = query(
-            f"""
-            SELECT pr.project_name, CAST(COUNT(*) AS int) AS total
-            FROM project_results pr
-            JOIN projects p ON LOWER(p.name) = LOWER(pr.project_name)
-            {where}
-            GROUP BY pr.project_name
-            ORDER BY total DESC LIMIT 10
-            """,
+            f"SELECT project_name, CAST(COUNT(*) AS int) AS total "
+            f"FROM {TABLE} {where} "
+            f"GROUP BY project_name ORDER BY total DESC LIMIT 10",
             params if params else None,
         )
         return jsonify({"projects": serialize_rows(rows)})
@@ -592,27 +609,23 @@ def dashboard_top_error_projects():
     to_ts = request.args.get("to", "")
     try:
         conditions = [
-            "pr.error IS NOT NULL", "pr.error <> ''",
-            "pr.error_status IN ('open', 'reopened')",
+            "row_type = 'log'",
+            "error IS NOT NULL", "error <> ''",
+            "error_status IN ('open', 'reopened')",
         ]
         params = []
         if from_ts:
-            conditions.append("pr.timestamp >= %s")
+            conditions.append("timestamp >= %s")
             params.append(from_ts)
         if to_ts:
-            conditions.append("pr.timestamp <= %s")
+            conditions.append("timestamp <= %s")
             params.append(to_ts)
         where = "WHERE " + " AND ".join(conditions)
         rows = query(
-            f"""
-            SELECT pr.project_name, CAST(COUNT(*) AS int) AS total
-            FROM project_results pr
-            JOIN projects p ON LOWER(p.name) = LOWER(pr.project_name)
-            {where}
-            GROUP BY pr.project_name
-            HAVING COUNT(*) > 0
-            ORDER BY total DESC LIMIT 10
-            """,
+            f"SELECT project_name, CAST(COUNT(*) AS int) AS total "
+            f"FROM {TABLE} {where} "
+            f"GROUP BY project_name HAVING COUNT(*) > 0 "
+            f"ORDER BY total DESC LIMIT 10",
             params if params else None,
         )
         return jsonify({"projects": serialize_rows(rows)})
@@ -625,23 +638,21 @@ def dashboard_top_error_projects():
 def dashboard_today_errors():
     try:
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        rows = query("""
-            SELECT pr.project_name AS project, pr.file_name, pr.error,
-                   pr.error_detail, pr.error_hash, pr.timestamp
-            FROM project_results pr
-            JOIN projects p ON LOWER(p.name) = LOWER(pr.project_name)
-            WHERE pr.error IS NOT NULL AND pr.error <> ''
-              AND pr.error_status IN ('open', 'reopened')
-              AND (
-                (pr.timestamp AT TIME ZONE 'UTC' >= CURRENT_DATE
-                 AND pr.timestamp AT TIME ZONE 'UTC' < CURRENT_DATE + INTERVAL '1 day')
-                OR
-                (pr.reopened_at IS NOT NULL
-                 AND pr.reopened_at AT TIME ZONE 'UTC' >= CURRENT_DATE
-                 AND pr.reopened_at AT TIME ZONE 'UTC' < CURRENT_DATE + INTERVAL '1 day')
-              )
-            ORDER BY pr.timestamp DESC
-        """)
+        rows = query(
+            f"SELECT project_name AS project, file_name, error, "
+            f"error_detail, error_hash, timestamp "
+            f"FROM {TABLE} "
+            f"WHERE row_type = 'log' AND error IS NOT NULL AND error <> '' "
+            f"AND error_status IN ('open', 'reopened') "
+            f"AND ("
+            f"  (timestamp AT TIME ZONE 'UTC' >= CURRENT_DATE "
+            f"   AND timestamp AT TIME ZONE 'UTC' < CURRENT_DATE + INTERVAL '1 day')"
+            f"  OR"
+            f"  (reopened_at IS NOT NULL "
+            f"   AND reopened_at AT TIME ZONE 'UTC' >= CURRENT_DATE "
+            f"   AND reopened_at AT TIME ZONE 'UTC' < CURRENT_DATE + INTERVAL '1 day')"
+            f") ORDER BY timestamp DESC"
+        )
         return jsonify({"date": date_str, "errors": serialize_rows(rows)})
     except Exception as e:
         print(f"[Dashboard] today-errors: {e}")
@@ -654,27 +665,23 @@ def dashboard_errors():
     to_ts = request.args.get("to", "")
     try:
         conditions = [
-            "pr.error IS NOT NULL", "pr.error <> ''",
-            "pr.error_status IN ('open', 'reopened')",
+            "row_type = 'log'",
+            "error IS NOT NULL", "error <> ''",
+            "error_status IN ('open', 'reopened')",
         ]
         params = []
-        idx = 1
-
         if from_ts:
-            conditions.append(f"pr.timestamp >= %s")
+            conditions.append("timestamp >= %s")
             params.append(from_ts)
         if to_ts:
-            conditions.append(f"pr.timestamp <= %s")
+            conditions.append("timestamp <= %s")
             params.append(to_ts)
-
         where = " AND ".join(conditions)
         rows = query(
-            f"SELECT pr.project_name AS project, pr.file_name, pr.error, "
-            f"pr.error_detail, pr.error_hash, pr.timestamp "
-            f"FROM project_results pr "
-            f"JOIN projects p ON LOWER(p.name) = LOWER(pr.project_name) "
-            f"WHERE {where} "
-            f"ORDER BY pr.timestamp DESC LIMIT 2000",
+            f"SELECT project_name AS project, file_name, error, "
+            f"error_detail, error_hash, timestamp "
+            f"FROM {TABLE} WHERE {where} "
+            f"ORDER BY timestamp DESC LIMIT 2000",
             params if params else None,
         )
         return jsonify({"errors": serialize_rows(rows)})
@@ -698,39 +705,38 @@ def breaks_grouped():
 
     try:
         conditions = [
-            "pr.error IS NOT NULL", "pr.error <> ''",
-            "pr.error_status IN ('open', 'reopened')",
+            "row_type = 'log'",
+            "error IS NOT NULL", "error <> ''",
+            "error_status IN ('open', 'reopened')",
         ]
         params = []
 
         if from_ts:
-            conditions.append("pr.timestamp >= %s")
+            conditions.append("timestamp >= %s")
             params.append(from_ts)
         if to_ts:
-            conditions.append("pr.timestamp <= %s")
+            conditions.append("timestamp <= %s")
             params.append(to_ts)
         if project_f:
-            conditions.append("LOWER(pr.project_name) = LOWER(%s)")
+            conditions.append("LOWER(project_name) = LOWER(%s)")
             params.append(project_f)
 
         where = " AND ".join(conditions)
 
         grouped_sql = (
-            f"SELECT pr.project_name, "
-            f"pr.error AS error_message, "
-            f"COALESCE(pr.error_hash, MD5(LOWER(TRIM(pr.error)))) AS error_hash, "
-            f"SUM(pr.failure_count)::int AS occurrence_count, "
-            f"MIN(pr.timestamp) AS first_seen, "
-            f"COALESCE(MAX(pr.reopened_at), MAX(pr.timestamp)) AS last_seen, "
+            f"SELECT project_name, "
+            f"error AS error_message, "
+            f"COALESCE(error_hash, MD5(LOWER(TRIM(error)))) AS error_hash, "
+            f"SUM(failure_count)::int AS occurrence_count, "
+            f"MIN(timestamp) AS first_seen, "
+            f"COALESCE(MAX(reopened_at), MAX(timestamp)) AS last_seen, "
             f"CASE "
-            f"  WHEN BOOL_OR(pr.error_status = 'reopened') THEN 'regression' "
-            f"  WHEN SUM(pr.failure_count) = 1 THEN 'new' "
+            f"  WHEN BOOL_OR(error_status = 'reopened') THEN 'regression' "
+            f"  WHEN SUM(failure_count) = 1 THEN 'new' "
             f"  ELSE 'existing' "
             f"END AS status "
-            f"FROM project_results pr "
-            f"JOIN projects p ON LOWER(p.name) = LOWER(pr.project_name) "
-            f"WHERE {where} "
-            f"GROUP BY pr.project_name, pr.error, COALESCE(pr.error_hash, MD5(LOWER(TRIM(pr.error))))"
+            f"FROM {TABLE} WHERE {where} "
+            f"GROUP BY project_name, error, COALESCE(error_hash, MD5(LOWER(TRIM(error))))"
         )
 
         # Apply status filter on the grouped result
@@ -764,11 +770,13 @@ def breaks_grouped():
 @app.route("/api/breaks/<break_id>")
 def get_break(break_id):
     """
-    GET /api/breaks/:id
-    Returns break detail with correlatedLogs: []
+    GET /api/breaks/:id — returns break detail with correlatedLogs: []
     """
     try:
-        rows = query("SELECT * FROM breaks WHERE id = %s", (break_id,))
+        rows = query(
+            f"SELECT * FROM {TABLE} WHERE row_type = 'log' AND id = %s",
+            (break_id,),
+        )
         if not rows:
             return jsonify({"error": "Not Found", "message": "Break not found."}), 404
         row = serialize_row(rows[0])
@@ -782,11 +790,7 @@ def get_break(break_id):
 def get_break_detail(error_hash):
     """
     GET /api/breaks/detail/:error_hash
-    Returns full error detail for the Error Details page:
-      - project_name, error_message, error_detail (stack trace), error_hash
-      - occurrence_count, first_seen, last_seen, status
-      - All occurrence rows (file_name, timestamp)
-      - Saved solution (if any)
+    Returns full error detail for the Error Details page.
     """
     try:
         project_name = (request.args.get('project_name') or '').strip() or None
@@ -828,7 +832,8 @@ def get_break_detail(error_hash):
             status = "existing"
 
         occurrences = [
-            {"file_name": r.get("file_name"), "timestamp": r["timestamp"], "failure_count": r.get("failure_count", 1)}
+            {"file_name": r.get("file_name"), "timestamp": r["timestamp"],
+             "failure_count": r.get("failure_count", 1)}
             for r in error_rows
         ]
 
@@ -891,9 +896,7 @@ def get_break_detail(error_hash):
 @app.route("/api/dashboard")
 def dashboard_legacy():
     """
-    GET /api/dashboard
-    Returns aggregated break counts, trend, top services, etc.
-    Falls back to empty data if the breaks table doesn't exist.
+    GET /api/dashboard — returns aggregated break counts, trend, etc.
     """
     try:
         def safe_count(sql):
@@ -904,10 +907,16 @@ def dashboard_legacy():
                 return 0
 
         last24h = safe_count(
-            "SELECT COUNT(*) AS count FROM breaks WHERE timestamp >= NOW() - INTERVAL '24 hours'"
+            f"SELECT COUNT(*) AS count FROM {TABLE} "
+            f"WHERE row_type = 'log' AND error IS NOT NULL AND error <> '' "
+            f"AND error_status IN ('open', 'reopened') "
+            f"AND timestamp >= NOW() - INTERVAL '24 hours'"
         )
         last7d = safe_count(
-            "SELECT COUNT(*) AS count FROM breaks WHERE timestamp >= NOW() - INTERVAL '7 days'"
+            f"SELECT COUNT(*) AS count FROM {TABLE} "
+            f"WHERE row_type = 'log' AND error IS NOT NULL AND error <> '' "
+            f"AND error_status IN ('open', 'reopened') "
+            f"AND timestamp >= NOW() - INTERVAL '7 days'"
         )
 
         return jsonify({
@@ -939,8 +948,9 @@ def dashboard_legacy():
 def get_alert_rules():
     try:
         rows = query(
-            "SELECT id, rule_name, project_name, alert_type, threshold, "
-            "window_minutes, is_active, created_at FROM alert_rules ORDER BY created_at DESC"
+            f"SELECT id, rule_name, project_name, alert_type, threshold, "
+            f"window_minutes, is_active, created_at FROM {TABLE} "
+            f"WHERE row_type = 'alert_rule' ORDER BY created_at DESC"
         )
         return jsonify(serialize_rows(rows))
     except Exception:
@@ -952,8 +962,9 @@ def create_alert_rule():
     body = request.get_json() or {}
     try:
         row = execute_returning(
-            "INSERT INTO alert_rules (id, rule_name, project_name, alert_type, "
-            "threshold, window_minutes, is_active) VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING *",
+            f"INSERT INTO {TABLE} (id, row_type, rule_name, project_name, alert_type, "
+            f"threshold, window_minutes, is_active, created_at) "
+            f"VALUES (%s,'alert_rule',%s,%s,%s,%s,%s,%s,NOW()) RETURNING *",
             (str(uuid.uuid4()), body.get("rule_name"), body.get("project_name"),
              body.get("alert_type"), body.get("threshold"), body.get("window_minutes"),
              body.get("is_active", True)),
@@ -968,8 +979,9 @@ def update_alert_rule(rule_id):
     body = request.get_json() or {}
     try:
         row = execute_returning(
-            "UPDATE alert_rules SET rule_name=%s, project_name=%s, alert_type=%s, "
-            "threshold=%s, window_minutes=%s, is_active=%s WHERE id=%s RETURNING *",
+            f"UPDATE {TABLE} SET rule_name=%s, project_name=%s, alert_type=%s, "
+            f"threshold=%s, window_minutes=%s, is_active=%s "
+            f"WHERE row_type = 'alert_rule' AND id=%s RETURNING *",
             (body.get("rule_name"), body.get("project_name"), body.get("alert_type"),
              body.get("threshold"), body.get("window_minutes"), body.get("is_active"), rule_id),
         )
@@ -984,7 +996,8 @@ def update_alert_rule(rule_id):
 def toggle_alert_rule(rule_id):
     try:
         row = execute_returning(
-            "UPDATE alert_rules SET is_active = NOT is_active WHERE id=%s RETURNING *",
+            f"UPDATE {TABLE} SET is_active = NOT is_active "
+            f"WHERE row_type = 'alert_rule' AND id=%s RETURNING *",
             (rule_id,),
         )
         if not row:
@@ -997,7 +1010,10 @@ def toggle_alert_rule(rule_id):
 @app.route("/api/alert-rules/<rule_id>", methods=["DELETE"])
 def delete_alert_rule(rule_id):
     try:
-        count = execute("DELETE FROM alert_rules WHERE id=%s", (rule_id,))
+        count = execute(
+            f"DELETE FROM {TABLE} WHERE row_type = 'alert_rule' AND id=%s",
+            (rule_id,),
+        )
         if count == 0:
             return jsonify({"error": "Rule not found"}), 404
         return make_response("", 204)
@@ -1007,7 +1023,8 @@ def delete_alert_rule(rule_id):
 
 @app.route("/api/alert-history")
 def get_alert_history():
-    conditions, values = [], []
+    conditions = ["h.row_type = 'alert_history'"]
+    values = []
     if request.args.get("project"):
         conditions.append("h.project_name = %s")
         values.append(request.args["project"])
@@ -1020,12 +1037,11 @@ def get_alert_history():
     if request.args.get("to"):
         conditions.append("h.triggered_at <= %s")
         values.append(request.args["to"])
-    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    where = "WHERE " + " AND ".join(conditions)
     try:
         rows = query(
-            f"SELECT h.id, h.rule_id, r.rule_name, h.project_name, h.error, "
-            f"h.alert_type, h.triggered_at FROM alert_history h "
-            f"LEFT JOIN alert_rules r ON r.id = h.rule_id {where} "
+            f"SELECT h.id, h.rule_id, h.rule_name, h.project_name, h.error, "
+            f"h.alert_type, h.triggered_at FROM {TABLE} h {where} "
             f"ORDER BY h.triggered_at DESC",
             values if values else None,
         )
@@ -1047,9 +1063,9 @@ def resolve_error_solution():
         return jsonify({"error": "error_hash and project_name are required"}), 400
     try:
         count = execute(
-            "UPDATE project_results SET error_status = 'resolved', resolved_at = NOW() "
-            "WHERE error_hash = %s AND LOWER(project_name) = LOWER(%s) "
-            "AND error_status IN ('open', 'reopened')",
+            f"UPDATE {TABLE} SET error_status = 'resolved', resolved_at = NOW() "
+            f"WHERE row_type = 'log' AND error_hash = %s AND LOWER(project_name) = LOWER(%s) "
+            f"AND error_status IN ('open', 'reopened')",
             (error_hash, project_name),
         )
         return jsonify({"resolved": count, "project_name": project_name, "error_hash": error_hash})
@@ -1166,7 +1182,9 @@ def list_users():
     if err:
         return err
     try:
-        rows = query("SELECT * FROM users ORDER BY created_at DESC")
+        rows = query(
+            f"SELECT * FROM {TABLE} WHERE row_type = 'user' ORDER BY created_at DESC"
+        )
         return jsonify(serialize_rows(rows))
     except Exception:
         return jsonify([])
@@ -1180,8 +1198,8 @@ def create_user():
     body = request.get_json() or {}
     try:
         row = execute_returning(
-            "INSERT INTO users (id, email, role, oauth_provider, oauth_subject) "
-            "VALUES (%s,%s,%s,%s,%s) RETURNING *",
+            f"INSERT INTO {TABLE} (id, row_type, email, role, oauth_provider, oauth_subject, created_at) "
+            f"VALUES (%s,'user',%s,%s,%s,%s,NOW()) RETURNING *",
             (str(uuid.uuid4()), body.get("email"), body.get("role"),
              body.get("oauthProvider"), body.get("oauthSubject")),
         )
@@ -1196,7 +1214,10 @@ def delete_user(user_id):
     if err:
         return err
     try:
-        count = execute("DELETE FROM users WHERE id = %s", (user_id,))
+        count = execute(
+            f"DELETE FROM {TABLE} WHERE row_type = 'user' AND id = %s",
+            (user_id,),
+        )
         if count == 0:
             return jsonify({"error": "User not found"}), 404
         return make_response("", 204)
@@ -1210,7 +1231,7 @@ def get_retention():
     if err:
         return err
     try:
-        rows = query("SELECT * FROM retention_policies")
+        rows = query(f"SELECT * FROM {TABLE} WHERE row_type = 'retention'")
         return jsonify(serialize_rows(rows))
     except Exception:
         return jsonify([])
@@ -1226,15 +1247,19 @@ def upsert_retention():
     days = body.get("retentionDays")
     try:
         count = execute(
-            "UPDATE retention_policies SET retention_days = %s WHERE application_id = %s",
+            f"UPDATE {TABLE} SET retention_days = %s "
+            f"WHERE row_type = 'retention' AND application_id = %s",
             (days, app_id),
         )
         if count > 0:
-            row = query("SELECT * FROM retention_policies WHERE application_id = %s", (app_id,))[0]
+            row = query(
+                f"SELECT * FROM {TABLE} WHERE row_type = 'retention' AND application_id = %s",
+                (app_id,),
+            )[0]
         else:
             row = execute_returning(
-                "INSERT INTO retention_policies (id, application_id, retention_days) "
-                "VALUES (%s,%s,%s) RETURNING *",
+                f"INSERT INTO {TABLE} (id, row_type, application_id, retention_days) "
+                f"VALUES (%s,'retention',%s,%s) RETURNING *",
                 (str(uuid.uuid4()), app_id, days),
             )
         return jsonify(serialize_row(row))
