@@ -20,6 +20,23 @@ interface Occurrence {
 interface SolutionData {
   solution: string | null;
   updated_at: string | null;
+  id?: string | null;
+  version?: number | null;
+  confidence_score?: number | null;
+  usage_count?: number | null;
+  created_by?: string | null;
+  created_at?: string | null;
+}
+
+interface SimilarSolution {
+  solution: string;
+  created_by: string | null;
+  created_at: string | null;
+}
+
+interface AiRecommendation {
+  recommendation: string | null;
+  solutions: SimilarSolution[];
 }
 
 interface ErrorDetailData {
@@ -34,6 +51,7 @@ interface ErrorDetailData {
   status: 'new' | 'existing' | 'regression';
   occurrences: Occurrence[];
   solution: SolutionData | null;
+  ai_recommendation?: AiRecommendation | null;
 }
 
 function fmt(ts: string | null) {
@@ -75,6 +93,13 @@ export function ErrorDetailModal({ row, errorHash, projectName: projectNameProp,
   const [resolving, setResolving] = useState(false);
   const [resolved, setResolved] = useState(false);
   const [resolveError, setResolveError] = useState('');
+  const [showVersions, setShowVersions] = useState(false);
+  const [versions, setVersions] = useState<any[]>([]);
+  const [loadingVersions, setLoadingVersions] = useState(false);
+  const [moreSolutions, setMoreSolutions] = useState<any[]>([]);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
+  const [solutionActionError, setSolutionActionError] = useState('');
 
   useEffect(() => {
     if (!effectiveErrorHash) return;
@@ -114,13 +139,23 @@ export function ErrorDetailModal({ row, errorHash, projectName: projectNameProp,
     if (!effectiveErrorHash || !solutionText.trim()) return;
     setSaving(true);
     try {
-      await apiFetch('/api/knowledge_base', {
+      const payload: Record<string, unknown> = {
+        error_hash: effectiveErrorHash,
+        solution: solutionText.trim(),
+        project_name: projectName,
+      };
+      if (data?.solution?.id && solutionSaved) {
+        payload.base_solution_id = data.solution.id;
+      }
+      const res = await apiFetch('/api/knowledge_base', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ error_hash: effectiveErrorHash, solution: solutionText.trim() }),
+        body: JSON.stringify(payload),
       });
+      const saved = await res.json();
       setSolutionSaved(true);
       setEditing(false);
+      setData((prev) => prev ? { ...prev, solution: { solution: saved.solution, updated_at: saved.created_at, id: saved.id, version: saved.version, confidence_score: saved.confidence_score, usage_count: saved.usage_count, created_by: saved.created_by, created_at: saved.created_at } } : prev);
     } catch (err) {
       console.error('Failed to save solution:', err);
     } finally {
@@ -136,6 +171,7 @@ export function ErrorDetailModal({ row, errorHash, projectName: projectNameProp,
       setSolutionText('');
       setSolutionSaved(false);
       setEditing(false);
+      setData((prev) => prev ? { ...prev, solution: null } : prev);
     } catch (err) {
       console.error('Failed to delete solution:', err);
     } finally {
@@ -159,10 +195,77 @@ export function ErrorDetailModal({ row, errorHash, projectName: projectNameProp,
         body: JSON.stringify({ error_hash: effectiveErrorHash, project_name: projectName }),
       });
       setResolved(true);
+      navigate('/dashboard');
     } catch (err) {
       setResolveError(err instanceof ApiError ? err.label : 'Failed to resolve error.');
     } finally {
       setResolving(false);
+    }
+  }
+
+  async function handleImproveSolution() {
+    setSolutionActionError('');
+    setEditing(true);
+    setSolutionText(data?.solution?.solution ?? solutionText);
+  }
+
+  async function handleUseSolution() {
+    if (!effectiveErrorHash || !projectName || !data?.solution?.id) return;
+    setSaving(true);
+    try {
+      await apiFetch('/api/knowledge_base/use', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ solution_id: data.solution.id, error_hash: effectiveErrorHash, project_name: projectName }),
+      });
+      navigate('/dashboard');
+    } catch (err) {
+      setSolutionActionError(err instanceof ApiError ? err.label : 'Failed to use solution.');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleShowVersions() {
+    if (!data?.solution?.id) return;
+    if (showVersions && versions.length) {
+      setShowVersions(false);
+      return;
+    }
+    setLoadingVersions(true);
+    try {
+      const res = await apiFetch(`/api/knowledge_base/${encodeURIComponent(data.solution.id)}/versions`);
+      const json = await res.json();
+      setVersions(json.versions ?? []);
+      setShowVersions(true);
+    } finally {
+      setLoadingVersions(false);
+    }
+  }
+
+  async function handleUseVersion(versionId: string) {
+    if (!effectiveErrorHash || !projectName) return;
+    setSaving(true);
+    try {
+      await apiFetch('/api/knowledge_base/use', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ solution_id: versionId, error_hash: effectiveErrorHash, project_name: projectName }),
+      });
+      navigate('/dashboard');
+    } catch (err) {
+      setSolutionActionError(err instanceof ApiError ? err.label : 'Failed to use version.');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleDeleteVersion(versionId: string) {
+    try {
+      await apiFetch(`/api/knowledge_base/${encodeURIComponent(data?.solution?.id ?? '')}/versions/${encodeURIComponent(versionId)}`, { method: 'DELETE' });
+      setVersions((prev) => prev.filter((v) => v.id !== versionId));
+    } catch (err) {
+      setSolutionActionError(err instanceof ApiError ? err.label : 'Failed to delete version.');
     }
   }
 
@@ -190,34 +293,32 @@ export function ErrorDetailModal({ row, errorHash, projectName: projectNameProp,
   const content = (
     <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100%', background: 'var(--surface)', border: '1px solid var(--card-border)', borderRadius: 14, width: '100%', maxWidth: 900, boxShadow: '0 24px 60px rgba(0,0,0,0.35)', overflow: 'hidden' }}>
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', padding: '20px 26px', borderBottom: '1px solid var(--card-border)' }}>
-        <div>
-          <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 8 }}>Error Detail</div>
-          <div style={{ display: 'grid', gap: 8, gridTemplateColumns: 'repeat(auto-fit, minmax(160px, max-content))' }}>
-            <span style={{ fontSize: 12, padding: '3px 10px', borderRadius: 4, background: '#6366f120', color: '#818cf8', fontWeight: 700 }}>
-              Project: {projectName || 'Unknown'}
-            </span>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 8 }}>
+            Error Details
+          </div>
+          {errorMessage && (
+            <div style={{ fontSize: 18, fontWeight: 700, color: '#f87171', lineHeight: 1.4, marginBottom: 14, wordBreak: 'break-word' }}>
+              {errorMessage}
+            </div>
+          )}
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16 }}>
+            <div>
+              <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 2 }}>Project</div>
+              <div style={{ fontSize: 13, fontWeight: 600, color: '#818cf8' }}>{projectName || 'Unknown'}</div>
+            </div>
             {displayFile && (
-              <span style={{ fontSize: 12, padding: '3px 10px', borderRadius: 4, background: 'rgba(255,255,255,0.06)', color: 'var(--text-muted)', fontFamily: 'ui-monospace,monospace' }}>
-                File: {displayFile}
-              </span>
-            )}
-            {errorMessage && (
-              <span style={{ fontSize: 12, padding: '3px 10px', borderRadius: 4, background: 'rgba(239,68,68,0.12)', color: '#f87171', fontWeight: 700 }}>
-                Error: {errorMessage}
-              </span>
-            )}
-            {errorHashValue && (
-              <button onClick={() => { onClose(); navigate(`/breaks/${encodeURIComponent(errorHashValue)}`); }}
-                style={{ fontSize: 12, padding: '3px 10px', borderRadius: 4, background: 'rgba(99,102,241,0.12)', color: '#818cf8', fontWeight: 600, border: '1px solid rgba(99,102,241,0.3)', cursor: 'pointer' }}>
-                View Full Details →
-              </button>
+              <div>
+                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 2 }}>File</div>
+                <div style={{ fontSize: 13, fontFamily: 'ui-monospace,monospace', color: 'var(--text)' }}>{displayFile}</div>
+              </div>
             )}
           </div>
         </div>
         <button onClick={onClose} style={{
           background: 'rgba(255,255,255,0.06)', border: '1px solid var(--card-border)',
           color: 'var(--text-muted)', fontSize: 16, cursor: 'pointer',
-          width: 32, height: 32, borderRadius: 8, flexShrink: 0,
+          width: 32, height: 32, borderRadius: 8, flexShrink: 0, marginLeft: 16,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
         }}>✕</button>
       </div>
@@ -252,6 +353,20 @@ export function ErrorDetailModal({ row, errorHash, projectName: projectNameProp,
             </div>
           )}
 
+          {data?.ai_recommendation?.recommendation && (
+            <div style={{ marginTop: 14, padding: 16, borderRadius: 10, background: 'rgba(56,189,248,0.08)', border: '1px solid rgba(56,189,248,0.2)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                <span style={{ fontSize: 14 }}>🤖</span>
+                <span style={{ fontSize: 12, fontWeight: 700, color: '#38bdf8', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                  AI Recommendation
+                </span>
+              </div>
+              <div style={{ fontSize: 14, lineHeight: 1.6, color: '#0f172a' }}>
+                {data.ai_recommendation.recommendation}
+              </div>
+            </div>
+          )}
+
           {data?.solution?.solution && (
             <div style={{ marginTop: 14, padding: 16, borderRadius: 10, background: 'rgba(99,102,241,0.08)', border: '1px solid rgba(99,102,241,0.2)' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
@@ -263,9 +378,32 @@ export function ErrorDetailModal({ row, errorHash, projectName: projectNameProp,
               <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: 'var(--text)', fontSize: 13, lineHeight: 1.7 }}>
                 {data.solution.solution}
               </div>
-              {data.solution.updated_at && (
-                <div style={{ marginTop: 10, fontSize: 11, color: 'var(--text-muted)' }}>
-                  Last updated: {new Date(data.solution.updated_at).toLocaleString()}
+              <div style={{ marginTop: 10, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', fontSize: 12, color: 'var(--text-muted)' }}>
+                {data.solution.created_by && <span>Developer: {data.solution.created_by}</span>}
+                {data.solution.created_at && <span>Created: {fmt(data.solution.created_at)}</span>}
+                {typeof data.solution.confidence_score === 'number' && <span>Confidence: {data.solution.confidence_score.toFixed(2)}</span>}
+                {typeof data.solution.usage_count === 'number' && <span>Usage: {data.solution.usage_count}</span>}
+                {typeof data.solution.version === 'number' && <span>Version: {data.solution.version}</span>}
+              </div>
+              <div style={{ marginTop: 12, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <button onClick={handleUseSolution} disabled={saving} style={{ ...btnPrimary, padding: '6px 12px' }}>Use Solution</button>
+                <button onClick={handleImproveSolution} style={{ ...btnSecondary, padding: '6px 12px' }}>Improve Solution</button>
+                <button onClick={handleShowVersions} disabled={loadingVersions} style={{ ...btnSecondary, padding: '6px 12px' }}>{loadingVersions ? 'Loading…' : (showVersions ? 'Hide Versions' : 'Show Versions')}</button>
+                <button onClick={handleDelete} disabled={saving} style={{ padding: '6px 12px', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: saving ? 'not-allowed' : 'pointer', background: 'rgba(239,68,68,0.1)', color: '#f87171', border: '1px solid rgba(239,68,68,0.25)' }}>Delete</button>
+              </div>
+              {solutionActionError && <div style={{ marginTop: 10, fontSize: 12, color: '#f87171' }}>{solutionActionError}</div>}
+              {showVersions && (
+                <div style={{ marginTop: 12, padding: 12, borderRadius: 8, border: '1px solid var(--card-border)', background: 'rgba(255,255,255,0.03)' }}>
+                  {versions.length === 0 ? <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>No other versions yet.</div> : versions.map((version) => (
+                    <div key={version.id} style={{ padding: '8px 0', borderBottom: '1px solid var(--card-border)' }}>
+                      <div style={{ fontSize: 12, color: 'var(--text)', marginBottom: 6 }}>Version {version.version ?? 1}</div>
+                      <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 6 }}>{version.solution}</div>
+                      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', fontSize: 11 }}>
+                        <button onClick={() => handleUseVersion(version.id)} style={{ ...btnPrimary, padding: '5px 10px' }}>Use Version</button>
+                        <button onClick={() => handleDeleteVersion(version.id)} style={{ ...btnSecondary, padding: '5px 10px' }}>Delete Version</button>
+                      </div>
+                    </div>
+                  ))}
                 </div>
               )}
             </div>
@@ -340,15 +478,7 @@ export function ErrorDetailModal({ row, errorHash, projectName: projectNameProp,
                   fontFamily: 'inherit',
                 }}
               />
-              <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-                <button onClick={handleSave} disabled={saving || !solutionText.trim()}
-                  style={{
-                    ...btnPrimary,
-                    opacity: (saving || !solutionText.trim()) ? 0.5 : 1,
-                    cursor: (saving || !solutionText.trim()) ? 'not-allowed' : 'pointer',
-                  }}>
-                  {saving ? 'Saving…' : (solutionSaved ? 'Update Solution' : 'Save Solution')}
-                </button>
+              <div style={{ display: 'flex', gap: 8, marginTop: 10, justifyContent: 'flex-end' }}>
                 {editing && (
                   <button onClick={() => { setEditing(false); setSolutionText(data?.solution?.solution ?? ''); }}
                     style={btnSecondary}>Cancel</button>
@@ -358,29 +488,7 @@ export function ErrorDetailModal({ row, errorHash, projectName: projectNameProp,
           )}
         </div>
 
-        {occurrences.length > 0 && (
-          <div style={{ ...cardStyle, marginTop: 16 }}>
-            <h3 style={sectionTitle}>Occurrences ({occurrences.length})</h3>
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-              <thead>
-                <tr style={{ borderBottom: '1px solid var(--card-border)' }}>
-                  <th style={thStyle}>File</th>
-                  <th style={thStyle}>Timestamp</th>
-                  <th style={thStyle}>Failures</th>
-                </tr>
-              </thead>
-              <tbody>
-                {occurrences.map((o, i) => (
-                  <tr key={i} style={{ borderBottom: '1px solid var(--card-border)' }}>
-                    <td style={tdStyle}>{o.file_name || '—'}</td>
-                    <td style={{ ...tdStyle, fontFamily: 'ui-monospace, monospace', fontSize: 11 }}>{fmt(o.timestamp)}</td>
-                    <td style={{ ...tdStyle, textAlign: 'center' }}>{o.failure_count}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
+
       </div>
 
       <div style={{ padding: '14px 26px', borderTop: '1px solid var(--card-border)', display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 12 }}>
@@ -396,26 +504,43 @@ export function ErrorDetailModal({ row, errorHash, projectName: projectNameProp,
         {resolved ? (
           <span style={{ fontSize: 13, color: '#34d399', fontWeight: 600 }}>✅ Resolved</span>
         ) : (
-          <button
-            onClick={handleResolve}
-            disabled={resolving || !solutionText.trim()}
-            title={!solutionText.trim() ? 'Add a solution before resolving' : ''}
-            style={{
-              padding: '8px 20px', borderRadius: 7, fontSize: 13, fontWeight: 600,
-              cursor: resolving ? 'not-allowed' : 'pointer',
-              background: !solutionText.trim()
-                ? 'rgba(255,255,255,0.04)'
-                : resolving ? 'rgba(16,185,129,0.1)' : 'rgba(16,185,129,0.15)',
-              color: !solutionText.trim() ? 'var(--text-muted)' : '#34d399',
-              border: !solutionText.trim()
-                ? '1px solid rgba(255,255,255,0.1)'
-                : '1px solid rgba(16,185,129,0.3)',
-              opacity: resolving ? 0.7 : 1,
-              flexShrink: 0,
-            }}
-          >
-            {resolving ? 'Resolving…' : '✓ Mark as Resolved'}
-          </button>
+          <>
+            {(!solutionSaved || editing) && (
+              <button
+                onClick={handleSave}
+                disabled={saving || !solutionText.trim()}
+                style={{
+                  padding: '8px 20px', borderRadius: 7, fontSize: 13, fontWeight: 600,
+                  cursor: (saving || !solutionText.trim()) ? 'not-allowed' : 'pointer',
+                  background: '#6366f1', color: '#fff', border: 'none',
+                  opacity: (saving || !solutionText.trim()) ? 0.45 : 1,
+                  flexShrink: 0,
+                }}
+              >
+                {saving ? 'Saving…' : (solutionSaved ? 'Update Solution' : 'Save Solution')}
+              </button>
+            )}
+            <button
+              onClick={handleResolve}
+              disabled={resolving || !solutionText.trim()}
+              title={!solutionText.trim() ? 'Add a solution before resolving' : ''}
+              style={{
+                padding: '8px 20px', borderRadius: 7, fontSize: 13, fontWeight: 600,
+                cursor: resolving ? 'not-allowed' : 'pointer',
+                background: !solutionText.trim()
+                  ? 'rgba(255,255,255,0.04)'
+                  : resolving ? 'rgba(16,185,129,0.1)' : 'rgba(16,185,129,0.15)',
+                color: !solutionText.trim() ? 'var(--text-muted)' : '#34d399',
+                border: !solutionText.trim()
+                  ? '1px solid rgba(255,255,255,0.1)'
+                  : '1px solid rgba(16,185,129,0.3)',
+                opacity: resolving ? 0.7 : 1,
+                flexShrink: 0,
+              }}
+            >
+              {resolving ? 'Resolving…' : '✓ Mark as Resolved'}
+            </button>
+          </>
         )}
       </div>
     </div>
@@ -438,22 +563,6 @@ export function ErrorDetailModal({ row, errorHash, projectName: projectNameProp,
   );
 }
 
-const cardStyle: React.CSSProperties = {
-  background: 'var(--card-bg)',
-  border: '1px solid var(--card-border)',
-  borderRadius: 10,
-  padding: 20,
-};
-
-const sectionTitle: React.CSSProperties = {
-  margin: '0 0 12px',
-  fontSize: 13,
-  fontWeight: 700,
-  color: 'var(--text-muted)',
-  textTransform: 'uppercase',
-  letterSpacing: 0.5,
-};
-
 const linkBtnStyle: React.CSSProperties = {
   background: 'none', border: 'none', color: '#818cf8',
   cursor: 'pointer', fontSize: 13, padding: 0, fontWeight: 500,
@@ -470,11 +579,3 @@ const btnSecondary: React.CSSProperties = {
   border: '1px solid var(--card-border)', cursor: 'pointer',
 };
 
-const thStyle: React.CSSProperties = {
-  padding: '8px 12px', textAlign: 'left', fontWeight: 600,
-  color: 'var(--text-muted)', fontSize: 11, textTransform: 'uppercase',
-};
-
-const tdStyle: React.CSSProperties = {
-  padding: '8px 12px', color: 'var(--text)',
-};

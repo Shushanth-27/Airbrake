@@ -45,6 +45,21 @@ CREATE INDEX IF NOT EXISTS idx_pr_error_status
   ON project_results (error_status)
   WHERE error IS NOT NULL AND error <> '';
 
+CREATE TABLE IF NOT EXISTS knowledge_base (
+  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  project_result_id UUID NOT NULL REFERENCES project_results(id) ON DELETE CASCADE,
+  solution          TEXT NOT NULL,
+  created_by        TEXT,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  usage_count       INTEGER NOT NULL DEFAULT 0,
+  version           INTEGER NOT NULL DEFAULT 1,
+  confidence_score  NUMERIC(5, 2) NOT NULL DEFAULT 50.0,
+  embedding         DOUBLE PRECISION[]
+);
+
+CREATE INDEX IF NOT EXISTS idx_kb_project_result_id
+  ON knowledge_base (project_result_id);
+
 CREATE INDEX IF NOT EXISTS idx_pr_project_error_status
   ON project_results (LOWER(project_name), error_status)
   WHERE error IS NOT NULL AND error <> '';
