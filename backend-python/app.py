@@ -42,6 +42,10 @@ ALLOWED_ORIGINS = {
     "http://airbrake.s3-website-us-east-1.amazonaws.com",
     "http://localhost:3000",
     "http://localhost:3001",
+    "http://localhost:3002",
+    "http://localhost:3003",
+    "http://localhost:3004",
+    "http://localhost:3005",
 }
 
 
@@ -817,8 +821,8 @@ def get_break_detail(error_hash):
         error_rows = query(
             "SELECT project_name, error AS error_message, error_detail, error_hash, "
             "failure_count, timestamp, error_status, reopened_at, file_name "
-            "FROM project_results "
-            f"WHERE {' AND '.join(conditions)} "
+            f"FROM {TABLE} "
+            f"WHERE row_type = 'log' AND {' AND '.join(conditions)} "
             "ORDER BY timestamp DESC",
             tuple(params),
         )
@@ -860,7 +864,7 @@ def get_break_detail(error_hash):
                 kb.created_at,
                 kb.created_by
             FROM knowledge_base kb
-            JOIN project_results pr
+            JOIN projects_data pr
             ON kb.project_result_id = pr.id
             WHERE {' AND '.join(solution_conditions)}
             ORDER BY kb.created_at DESC
@@ -1101,8 +1105,8 @@ def use_solution():
     try:
         increment_usage(solution_id)
         execute(
-            "UPDATE project_results SET error_status = 'resolved', resolved_at = NOW() "
-            "WHERE error_hash = %s AND LOWER(project_name) = LOWER(%s) "
+            f"UPDATE {TABLE} SET error_status = 'resolved', resolved_at = NOW() "
+            f"WHERE row_type = 'log' AND error_hash = %s AND LOWER(project_name) = LOWER(%s) "
             "AND error_status IN ('open', 'reopened')",
             (error_hash, project_name),
         )
@@ -1151,7 +1155,7 @@ def get_error_solution(error_hash):
         """
         SELECT kb.solution, kb.created_at
         FROM knowledge_base kb
-        JOIN project_results pr
+        JOIN projects_data pr
             ON kb.project_result_id = pr.id
         WHERE pr.error_hash = %s
         ORDER BY kb.created_at DESC
@@ -1195,7 +1199,7 @@ def delete_error_solution(error_hash):
         execute(
             "DELETE FROM knowledge_base "
             "WHERE project_result_id IN ("
-            "  SELECT id FROM project_results WHERE error_hash = %s"
+            "  SELECT id FROM projects_data WHERE row_type = 'log' AND error_hash = %s"
             ")",
             (error_hash,),
         )

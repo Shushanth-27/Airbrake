@@ -6,10 +6,10 @@ from db import execute, query
 
 print("[Migration] Starting single-table migration...")
 
-# 1. Create project_results table
-print("[Migration] Creating project_results table...")
+# 1. Create projects_data table
+print("[Migration] Creating projects_data table...")
 execute("""
-    CREATE TABLE IF NOT EXISTS project_results (
+    CREATE TABLE IF NOT EXISTS projects_data (
         id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         project_name    TEXT NOT NULL,
         file_name       TEXT,
@@ -31,30 +31,30 @@ execute("""
         first_seen      TIMESTAMPTZ
     )
 """)
-print("[Migration] project_results table created.")
+print("[Migration] projects_data table created.")
 
 # 2. Create indexes
 print("[Migration] Creating indexes...")
 execute("""
     CREATE INDEX IF NOT EXISTS idx_pr_project_name
-    ON project_results (LOWER(project_name))
+    ON projects_data (LOWER(project_name))
 """)
 execute("""
     CREATE INDEX IF NOT EXISTS idx_pr_timestamp
-    ON project_results (timestamp DESC)
+    ON projects_data (timestamp DESC)
 """)
 execute("""
     CREATE INDEX IF NOT EXISTS idx_pr_error_hash
-    ON project_results (error_hash)
+    ON projects_data (error_hash)
 """)
 execute("""
     CREATE INDEX IF NOT EXISTS idx_pr_error_status
-    ON project_results (error_status)
+    ON projects_data (error_status)
 """)
 execute("""
     CREATE TABLE IF NOT EXISTS knowledge_base (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        project_result_id UUID NOT NULL REFERENCES project_results(id) ON DELETE CASCADE,
+        project_result_id UUID NOT NULL REFERENCES projects_data(id) ON DELETE CASCADE,
         solution TEXT NOT NULL,
         created_by TEXT,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -87,9 +87,9 @@ print("[Migration] projects table verified.")
 projects = query("SELECT COUNT(*) AS cnt FROM projects")
 print(f"[Migration] Projects in registry: {projects[0]['cnt']}")
 
-results = query("SELECT COUNT(*) AS cnt FROM project_results")
-print(f"[Migration] Rows in project_results: {results[0]['cnt']}")
+results = query("SELECT COUNT(*) AS cnt FROM projects_data")
+print(f"[Migration] Rows in projects_data: {results[0]['cnt']}")
 
 print("\n[Migration] DONE! Migration complete.")
-print("\nNOTE: If project_results is empty, you need to migrate data from")
+print("\nNOTE: If projects_data is empty, you need to migrate data from")
 print("the old per-project tables. Run the data migration next.")

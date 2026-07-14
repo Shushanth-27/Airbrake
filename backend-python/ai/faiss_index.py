@@ -46,7 +46,7 @@ class FaissIndex:
             """
             SELECT kb.id, kb.solution, kb.embedding, pr.project_name, pr.error_hash
             FROM knowledge_base kb
-            JOIN project_results pr ON kb.project_result_id = pr.id
+            JOIN projects_data pr ON kb.project_result_id = pr.id
             """
         )
         vectors: List[List[float]] = []
