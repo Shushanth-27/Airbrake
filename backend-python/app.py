@@ -22,6 +22,14 @@ from datetime import datetime, timezone
 from flask import Flask, request, jsonify, make_response
 from db import query, execute, execute_returning
 from teams import send_teams_alert, test_teams_webhook
+from ai.recommendations import get_ai_recommendations
+from ai.knowledge_base import (
+    delete_solution_version,
+    get_solution_versions,
+    get_top_solutions,
+    increment_usage,
+    insert_solution,
+)
 
 app = Flask(__name__)
 app.config["JSON_SORT_KEYS"] = False
@@ -871,6 +879,12 @@ def get_break_detail(error_hash):
                 "created_by": s.get("created_by"),
             }
 
+        ai_recommendation = None
+        try:
+            ai_recommendation = get_ai_recommendations(error_hash, project_name)
+        except Exception as e:
+            print(f"[Breaks] ai recommendation error: {e}")
+
         result = {
             "project_name": first["project_name"],
             "file_name": file_name,
@@ -882,6 +896,7 @@ def get_break_detail(error_hash):
             "status": status,
             "occurrences": serialize_rows(occurrences),
             "solution": solution_data,
+            "ai_recommendation": ai_recommendation,
         }
         return jsonify(serialize_row(result))
     except Exception as e:
@@ -1075,6 +1090,60 @@ def resolve_error_solution():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/knowledge_base/use", methods=["POST"])
+def use_solution():
+    body = request.get_json() or {}
+    solution_id = body.get("solution_id")
+    error_hash = body.get("error_hash")
+    project_name = body.get("project_name")
+    if not solution_id or not error_hash or not project_name:
+        return jsonify({"error": "solution_id, error_hash and project_name are required"}), 400
+    try:
+        increment_usage(solution_id)
+        execute(
+            "UPDATE project_results SET error_status = 'resolved', resolved_at = NOW() "
+            "WHERE error_hash = %s AND LOWER(project_name) = LOWER(%s) "
+            "AND error_status IN ('open', 'reopened')",
+            (error_hash, project_name),
+        )
+        return jsonify({"used": True, "solution_id": solution_id})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/knowledge_base/<solution_id>/versions", methods=["GET"])
+def get_solution_versions_route(solution_id):
+    try:
+        versions = get_solution_versions(solution_id)
+        return jsonify({"versions": versions})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/knowledge_base/<solution_id>/versions/<version_id>", methods=["DELETE"])
+def delete_solution_version_route(solution_id, version_id):
+    try:
+        count = delete_solution_version(version_id)
+        return jsonify({"deleted": count > 0, "version_id": version_id})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/knowledge_base/top", methods=["GET"])
+def get_top_solutions_route():
+    error_hash = request.args.get("error_hash")
+    project_name = request.args.get("project_name")
+    limit = int(request.args.get("limit", "5"))
+    offset = int(request.args.get("offset", "0"))
+    if not error_hash:
+        return jsonify({"error": "error_hash is required"}), 400
+    try:
+        rows, total = get_top_solutions(error_hash, project_name, limit=limit, offset=offset)
+        return jsonify({"solutions": rows, "total": total})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/knowledge_base/<error_hash>", methods=["GET"])
 def get_error_solution(error_hash):
     try:
@@ -1107,50 +1176,14 @@ def upsert_error_solution():
     error_hash = body.get("error_hash")
     solution = body.get("solution")
     created_by = body.get("created_by") or "developer"
+    project_name = body.get("project_name")
+    base_solution_id = body.get("base_solution_id")
     if not error_hash:
         return jsonify({"error": "error_hash is required"}), 400
     if not solution:
         return jsonify({"error": "solution is required"}), 400
     try:
-        project = query(
-            """
-            SELECT id
-            FROM project_results
-            WHERE error_hash = %s
-            LIMIT 1
-            """,
-            (error_hash,),
-        )
-        if not project:
-            return jsonify({"error": "No matching project_result found"}), 404
-        project_result_id = project[0]["id"]
-        row = execute_returning(
-            """
-            INSERT INTO knowledge_base
-            (
-                id,
-                project_result_id,
-                solution,
-                created_by,
-                created_at
-            )
-            VALUES
-            (
-                %s,
-                %s,
-                %s,
-                %s,
-                NOW()
-            )
-            RETURNING *
-            """,
-            (
-                str(uuid.uuid4()),
-                project_result_id,
-                solution,
-                created_by,
-            ),
-        )
+        row = insert_solution(error_hash, solution, created_by=created_by, project_name=project_name, base_solution_id=base_solution_id)
         return jsonify(serialize_row(row)), 201
     except Exception as e:
         return jsonify({"error": str(e)}), 500

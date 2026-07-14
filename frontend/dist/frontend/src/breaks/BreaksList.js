@@ -118,7 +118,16 @@ function BreaksList() {
                                                 padding: '10px 16px', textAlign: 'left', fontWeight: 600,
                                                 color: 'var(--text-muted)', borderBottom: '1px solid var(--card-border)',
                                                 fontSize: 11, textTransform: 'uppercase', letterSpacing: 1, whiteSpace: 'nowrap',
-                                            }, children: h }, h))) }) }), (0, jsx_runtime_1.jsx)("tbody", { children: (result?.data ?? []).length === 0 ? ((0, jsx_runtime_1.jsx)("tr", { children: (0, jsx_runtime_1.jsx)("td", { colSpan: 5, style: { padding: '40px 0', textAlign: 'center', color: 'var(--text-muted)', fontSize: 14 }, children: "No breaks found" }) })) : (result?.data ?? []).map((b, i) => ((0, jsx_runtime_1.jsxs)("tr", { "data-testid": "break-item", "data-status": b.status, onClick: () => navigate(`/breaks/${b.error_hash}`), style: { borderBottom: '1px solid var(--card-border)', background: i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.01)', cursor: 'pointer' }, children: [(0, jsx_runtime_1.jsx)("td", { style: { padding: '11px 16px', whiteSpace: 'nowrap' }, children: (0, jsx_runtime_1.jsx)("span", { style: {
+                                            }, children: h }, h))) }) }), (0, jsx_runtime_1.jsx)("tbody", { children: (result?.data ?? []).length === 0 ? ((0, jsx_runtime_1.jsx)("tr", { children: (0, jsx_runtime_1.jsx)("td", { colSpan: 5, style: { padding: '40px 0', textAlign: 'center', color: 'var(--text-muted)', fontSize: 14 }, children: "No breaks found" }) })) : (result?.data ?? []).map((b, i) => ((0, jsx_runtime_1.jsxs)("tr", { "data-testid": "break-item", "data-status": b.status, onClick: () => navigate(`/breaks/${b.error_hash}?project_name=${encodeURIComponent(b.project_name)}`, {
+                                            state: {
+                                                project: b.project_name,
+                                                file_name: null,
+                                                error: b.error_message,
+                                                error_hash: b.error_hash,
+                                                error_detail: null,
+                                                timestamp: b.first_seen,
+                                            },
+                                        }), style: { borderBottom: '1px solid var(--card-border)', background: i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.01)', cursor: 'pointer' }, children: [(0, jsx_runtime_1.jsx)("td", { style: { padding: '11px 16px', whiteSpace: 'nowrap' }, children: (0, jsx_runtime_1.jsx)("span", { style: {
                                                         fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 4,
                                                         background: '#6366f120', color: '#818cf8',
                                                     }, children: b.project_name }) }), (0, jsx_runtime_1.jsx)("td", { style: { padding: '11px 16px', color: '#f87171', fontFamily: 'ui-monospace, monospace', fontSize: 12, maxWidth: 340, wordBreak: 'break-word' }, children: b.error_message }), (0, jsx_runtime_1.jsx)("td", { style: { padding: '11px 16px', textAlign: 'center' }, children: (0, jsx_runtime_1.jsx)("span", { style: {
