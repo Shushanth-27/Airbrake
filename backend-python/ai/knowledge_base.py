@@ -24,9 +24,8 @@ def _get_project_result(error_hash: str, project_name: Optional[str] = None) -> 
     rows = query(
         f"""
         SELECT id, project_name, error_hash
-        FROM project_results
-        WHERE {' AND '.join(conditions)}
-        LIMIT 1
+        FROM projects_data
+        WHERE row_type = 'log' AND {' AND '.join(conditions)}
         """,
         tuple(params),
     )
@@ -36,7 +35,7 @@ def _get_project_result(error_hash: str, project_name: Optional[str] = None) -> 
 def _find_solution(solution_id: str) -> Optional[Dict[str, Any]]:
     rows = query(
         "SELECT kb.*, pr.error_hash, pr.project_name FROM knowledge_base kb "
-        "JOIN project_results pr ON kb.project_result_id = pr.id "
+        "JOIN projects_data pr ON kb.project_result_id = pr.id "
         "WHERE kb.id = %s",
         (solution_id,),
     )
@@ -141,7 +140,7 @@ def get_top_solutions(
         SELECT kb.id, kb.solution, kb.created_by, kb.created_at, kb.usage_count,
                kb.confidence_score, kb.version, kb.project_result_id
         FROM knowledge_base kb
-        JOIN project_results pr ON kb.project_result_id = pr.id
+        JOIN projects_data pr ON kb.project_result_id = pr.id
         WHERE {' AND '.join(conditions)}
         ORDER BY kb.confidence_score DESC, kb.usage_count DESC, kb.created_at DESC
         LIMIT %s OFFSET %s
@@ -153,7 +152,7 @@ def get_top_solutions(
         f"""
         SELECT COUNT(*) AS total
         FROM knowledge_base kb
-        JOIN project_results pr ON kb.project_result_id = pr.id
+        JOIN projects_data pr ON kb.project_result_id = pr.id
         WHERE {' AND '.join(conditions)}
         """,
         tuple(params),

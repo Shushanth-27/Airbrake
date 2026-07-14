@@ -36,8 +36,8 @@ def get_similar_solutions(
     error_rows = query(
         f"""
         SELECT pr.error AS error_message, pr.error_detail
-        FROM project_results pr
-        WHERE {' AND '.join(conditions)}
+        FROM projects_data pr
+        WHERE pr.row_type = 'log' AND {' AND '.join(conditions)}
         LIMIT 1
         """,
         tuple(params),
@@ -85,8 +85,8 @@ def get_ai_recommendations(
     error_rows = query(
         """
         SELECT error AS error_message, error_detail
-        FROM project_results
-        WHERE error_hash = %s
+        FROM projects_data
+        WHERE row_type = 'log' AND error_hash = %s
         LIMIT 1
         """,
         (error_hash,),
