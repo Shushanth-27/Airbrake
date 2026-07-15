@@ -10,8 +10,30 @@ from __future__ import annotations
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
-from ai.embeddings import create_embedding
 from db import execute, execute_returning, query
+
+
+def _create_embedding_safe(text: str) -> Optional[str]:
+    """Generate a Gemini embedding and return it as a JSON string for the TEXT column.
+
+    Returns None (no embedding stored) if:
+    - ai.embeddings or numpy is unavailable (Lambda package missing)
+    - Gemini API call fails
+    - The result is a zero vector (API key invalid / quota exceeded)
+
+    The solution is always saved regardless — embedding is optional.
+    """
+    try:
+        from ai.embeddings import create_embedding  # lazy import — numpy optional
+        import json as _json
+        vec = create_embedding(text)
+        if vec and any(v != 0.0 for v in vec):
+            return _json.dumps(vec)
+        print("[KnowledgeBase] embedding skipped — zero vector (Gemini may be unavailable)")
+        return None
+    except Exception as exc:
+        print(f"[KnowledgeBase] embedding failed — solution will be saved without it: {exc}")
+        return None
 
 
 def calculate_confidence(usage_count: int) -> float:
@@ -69,16 +91,8 @@ def insert_solution(
     confidence    = calculate_confidence(usage_count)
 
     # Generate embedding — stored as JSON text in Aurora DSQL (embedding col is text)
-    embedding: Optional[str] = None
-    try:
-        import json as _json
-        vec = create_embedding(solution)
-        if vec and any(v != 0.0 for v in vec):
-            embedding = _json.dumps(vec)
-        else:
-            print("[KnowledgeBase] embedding skipped (zero vector returned)")
-    except Exception as exc:
-        print(f"[KnowledgeBase] embedding failed (solution saved without it): {exc}")
+    # Gracefully skipped if Gemini is unavailable — solution is always saved
+    embedding = _create_embedding_safe(solution)
 
     row = execute_returning(
         f"INSERT INTO {TABLE} "

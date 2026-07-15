@@ -18,8 +18,11 @@ import random
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify, make_response
 from db import query, execute, execute_returning
+
+# ── Knowledge base functions (DB only, no AI runtime required) ────────────────
+# These are always imported directly — they handle Gemini failures internally.
+KB_AVAILABLE = False
 try:
-    from ai.recommendations import get_ai_recommendations
     from ai.knowledge_base import (
         delete_solution_version,
         get_solution_versions,
@@ -27,16 +30,26 @@ try:
         increment_usage,
         insert_solution,
     )
-    _AI_AVAILABLE = True
-except Exception as _ai_import_err:
-    print(f"[app] WARNING: AI imports failed — AI features disabled: {_ai_import_err}")
-    _AI_AVAILABLE = False
-    def get_ai_recommendations(*a, **kw): return {"recommendation": None, "solutions": []}
-    def insert_solution(*a, **kw): raise RuntimeError("AI not available")
-    def increment_usage(*a, **kw): raise RuntimeError("AI not available")
+    KB_AVAILABLE = True
+except Exception as _kb_import_err:
+    import traceback as _tb
+    print(f"[app] WARNING: knowledge_base import failed: {_kb_import_err}")
+    _tb.print_exc()
+    def insert_solution(*a, **kw): raise RuntimeError(f"Knowledge Base unavailable: {_kb_import_err}")
+    def increment_usage(*a, **kw): raise RuntimeError(f"Knowledge Base unavailable: {_kb_import_err}")
     def get_top_solutions(*a, **kw): return [], 0
     def get_solution_versions(*a, **kw): return []
     def delete_solution_version(*a, **kw): return 0
+
+# ── AI recommendation (requires Gemini/LLM at runtime, gracefully disabled) ───
+AI_RECOMMENDATIONS_AVAILABLE = False
+try:
+    from ai.recommendations import get_ai_recommendations
+    AI_RECOMMENDATIONS_AVAILABLE = True
+except Exception as _ai_import_err:
+    print(f"[app] WARNING: AI recommendations import failed — recommendations disabled: {_ai_import_err}")
+    def get_ai_recommendations(*a, **kw):
+        return {"recommendation": None, "solutions": [], "error": str(_ai_import_err)}
 
 app = Flask(__name__)
 app.config["JSON_SORT_KEYS"] = False
@@ -103,9 +116,22 @@ def require_role(*roles):
 
 
 # ── Serialization helper ──────────────────────────────────────────────────────
+import decimal as _decimal
+
+
+def _safe_value(v):
+    """Convert non-JSON-serializable DB values to safe Python primitives."""
+    if isinstance(v, datetime):
+        return v.isoformat()
+    if isinstance(v, _decimal.Decimal):
+        return float(v)
+    # psycopg2 returns UUIDs as strings already, but guard just in case
+    return v
+
+
 def serialize_row(row):
-    """Convert datetime values to ISO strings for JSON serialization."""
-    return {k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in row.items()}
+    """Convert DB row values to JSON-serializable Python primitives."""
+    return {k: _safe_value(v) for k, v in row.items()}
 
 
 def serialize_rows(rows):
@@ -1074,7 +1100,8 @@ def use_solution():
         )
         return jsonify({"used": True, "solution_id": solution_id})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        import traceback; traceback.print_exc()
+        return jsonify({"error": str(e), "exception": type(e).__name__}), 500
 
 
 @app.route("/api/knowledge_base/<solution_id>/versions", methods=["GET"])
@@ -1083,7 +1110,8 @@ def get_solution_versions_route(solution_id):
         versions = get_solution_versions(solution_id)
         return jsonify({"versions": versions})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        import traceback; traceback.print_exc()
+        return jsonify({"error": str(e), "exception": type(e).__name__}), 500
 
 
 @app.route("/api/knowledge_base/<solution_id>/versions/<version_id>", methods=["DELETE"])
@@ -1092,7 +1120,8 @@ def delete_solution_version_route(solution_id, version_id):
         count = delete_solution_version(version_id)
         return jsonify({"deleted": count > 0, "version_id": version_id})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        import traceback; traceback.print_exc()
+        return jsonify({"error": str(e), "exception": type(e).__name__}), 500
 
 
 @app.route("/api/knowledge_base/top", methods=["GET"])
@@ -1107,7 +1136,8 @@ def get_top_solutions_route():
         rows, total = get_top_solutions(error_hash, project_name, limit=limit, offset=offset)
         return jsonify({"solutions": rows, "total": total})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        import traceback; traceback.print_exc()
+        return jsonify({"error": str(e), "exception": type(e).__name__}), 500
 
 
 @app.route("/api/knowledge_base/<error_hash>", methods=["GET"])
@@ -1126,8 +1156,9 @@ def get_error_solution(error_hash):
             "solution": r["solution"],
             "updated_at": r["created_at"].isoformat() if r.get("created_at") else None,
         })
-    except Exception:
-        return jsonify({"error": "Internal server error"}), 500
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({"error": str(e), "exception": type(e).__name__}), 500
 
 
 @app.route("/api/knowledge_base", methods=["POST"])
@@ -1146,7 +1177,15 @@ def upsert_error_solution():
         row = insert_solution(error_hash, solution, created_by=created_by, project_name=project_name, base_solution_id=base_solution_id)
         return jsonify(serialize_row(row)), 201
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        import traceback as _tb
+        tb_str = _tb.format_exc()
+        print(f"[KnowledgeBase] Save Solution FAILED — {type(e).__name__}: {e}")
+        print(tb_str)
+        return jsonify({
+            "error": str(e),
+            "exception": type(e).__name__,
+            "traceback": tb_str,
+        }), 500
 
 
 @app.route("/api/knowledge_base/<error_hash>", methods=["DELETE"])
@@ -1158,8 +1197,8 @@ def delete_error_solution(error_hash):
         )
         return make_response("", 204)
     except Exception as e:
-        print(f"[Knowledge Base] delete error: {e}")
-        return jsonify({"error": "Internal server error"}), 500
+        import traceback; traceback.print_exc()
+        return jsonify({"error": str(e), "exception": type(e).__name__}), 500
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

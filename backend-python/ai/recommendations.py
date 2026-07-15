@@ -15,13 +15,32 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-import numpy as np
-
-from ai.embeddings import create_embedding, cosine_similarity, EMBEDDING_DIM
-from ai.llm import generate_suggested_solution
 from db import query
 
 TABLE = "projects_data"
+
+# EMBEDDING_DIM matches text-embedding-004 output — used for dimension validation
+EMBEDDING_DIM = 768
+
+
+def _get_embeddings():
+    """Lazy import of embeddings module — returns (create_embedding, cosine_similarity) or (None, None)."""
+    try:
+        from ai.embeddings import create_embedding, cosine_similarity
+        return create_embedding, cosine_similarity
+    except Exception as exc:
+        print(f"[Recommendations] embeddings unavailable: {exc}")
+        return None, None
+
+
+def _get_llm():
+    """Lazy import of LLM module — returns generate_suggested_solution or None."""
+    try:
+        from ai.llm import generate_suggested_solution
+        return generate_suggested_solution
+    except Exception as exc:
+        print(f"[Recommendations] LLM unavailable: {exc}")
+        return None
 
 
 def _serialize_solution(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -62,12 +81,9 @@ def _rank_by_cosine(
     query_vec: List[float],
     candidates: List[Dict[str, Any]],
     limit: int,
+    cosine_similarity_fn: Any,
 ) -> List[Dict[str, Any]]:
-    """Rank candidates by cosine similarity to query_vec.
-
-    Candidates whose stored embedding is missing, unparseable, or the wrong
-    dimension fall back to their confidence_score rank.
-    """
+    """Rank candidates by cosine similarity to query_vec."""
     scored: List[tuple[float, Dict[str, Any]]] = []
     unscored: List[Dict[str, Any]] = []
 
@@ -75,7 +91,7 @@ def _rank_by_cosine(
         emb = _parse_embedding(row.get("embedding"))
         if emb and len(emb) == EMBEDDING_DIM:
             try:
-                sim = cosine_similarity(query_vec, emb)
+                sim = cosine_similarity_fn(query_vec, emb)
                 scored.append((sim, row))
             except Exception:
                 unscored.append(row)
@@ -94,12 +110,11 @@ def get_similar_solutions(
 ) -> List[Dict[str, Any]]:
     """Return up to *limit* solutions ranked by semantic similarity.
 
-    Steps:
-      1. Look up the error text from projects_data
-      2. Generate a Gemini embedding for the error
-      3. Pull candidate solutions from projects_data WHERE row_type='solution'
-      4. Re-rank by cosine similarity
+    If embeddings are unavailable, returns SQL-ranked candidates directly
+    (ordered by confidence_score, usage_count) — no cosine ranking.
     """
+    create_embedding, cosine_similarity = _get_embeddings()
+
     # ── 1. Fetch error text ──────────────────────────────────────────────────
     conditions = ["row_type = 'log'",
                   "(error_hash = %s OR MD5(LOWER(TRIM(error))) = %s)"]
@@ -122,9 +137,6 @@ def get_similar_solutions(
     detail_text = (error_rows[0].get("error_detail") or "")
     query_text  = f"{error_text}\n\n{detail_text}".strip() or error_text
 
-    # ── 2. Generate embedding for the error ──────────────────────────────────
-    query_vec = create_embedding(query_text)
-
     # ── 3. Pull candidates from projects_data (SQL pre-filter, up to 50) ────
     sol_conditions: List[str] = ["row_type = 'solution'"]
     sol_params: List[Any] = []
@@ -145,8 +157,18 @@ def get_similar_solutions(
     if not candidates:
         return []
 
-    # ── 4. Re-rank by cosine similarity ──────────────────────────────────────
-    ranked = _rank_by_cosine(query_vec, candidates, limit)
+    # ── 2 + 4. Generate embedding and re-rank by cosine similarity ────────────
+    # If embeddings unavailable, skip cosine ranking — return SQL-ranked order
+    if create_embedding and cosine_similarity:
+        try:
+            query_vec = create_embedding(query_text)
+            ranked = _rank_by_cosine(query_vec, candidates, limit, cosine_similarity)
+        except Exception as exc:
+            print(f"[Recommendations] cosine ranking failed, using SQL order: {exc}")
+            ranked = candidates[:limit]
+    else:
+        ranked = candidates[:limit]
+
     return [_serialize_solution(r) for r in ranked]
 
 
@@ -175,6 +197,10 @@ def get_ai_recommendations(
     if detail:
         prompt = f"{prompt}\n\nDetails:\n{detail}".strip()
 
-    # LLM fallback chain lives inside generate_suggested_solution
-    recommendation = generate_suggested_solution(prompt, solutions[:5])
+    # LLM fallback chain — lazy import, gracefully returns None if unavailable
+    generate_suggested_solution = _get_llm()
+    if generate_suggested_solution:
+        recommendation = generate_suggested_solution(prompt, solutions[:5])
+    else:
+        recommendation = None
     return {"recommendation": recommendation, "solutions": solutions}
