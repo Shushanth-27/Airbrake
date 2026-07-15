@@ -838,7 +838,13 @@ def breaks_grouped():
         return jsonify({"data": serialize_rows(data), "total": total, "page": page, "limit": limit})
     except Exception as e:
         print(f"[Breaks] grouped error: {e}")
-        return jsonify({"error": "Internal server error"}), 500
+        return jsonify({
+            "error": f"Failed to load grouped breaks: {str(e)}",
+            "data": [],
+            "total": 0,
+            "page": page,
+            "limit": limit,
+        }), 500
 
 
 @app.route("/api/breaks/<break_id>")
@@ -911,34 +917,42 @@ def get_break_detail(error_hash):
             for r in error_rows
         ]
 
-        # Get latest solution from projects_data (row_type='solution')
-        solution_conditions = [
-            "row_type = 'solution'",
-            "(error_hash = %s OR error_hash IN ("
-            f"  SELECT error_hash FROM {TABLE} WHERE row_type = 'log' "
-            f"  AND MD5(LOWER(TRIM(error))) = %s))",
-        ]
-        solution_params = [error_hash, error_hash]
-        if project_name:
-            solution_conditions.append("LOWER(project_name) = LOWER(%s)")
-            solution_params.append(project_name)
-
-        solution_rows = query(
-            f"SELECT solution, created_at, created_by "
-            f"FROM {TABLE} WHERE {' AND '.join(solution_conditions)} "
-            f"ORDER BY created_at DESC LIMIT 1",
-            tuple(solution_params),
-        )
-
+        # Get latest solution from projects_data (row_type='solution') — isolated so failure
+        # does not prevent the rest of Error Details from loading
         solution_data = None
+        solution_error = None
+        try:
+            solution_conditions = [
+                "row_type = 'solution'",
+                "(error_hash = %s OR error_hash IN ("
+                f"  SELECT error_hash FROM {TABLE} WHERE row_type = 'log' "
+                f"  AND MD5(LOWER(TRIM(error))) = %s))",
+            ]
+            solution_params = [error_hash, error_hash]
+            if project_name:
+                solution_conditions.append("LOWER(project_name) = LOWER(%s)")
+                solution_params.append(project_name)
 
-        if solution_rows:
-            s = solution_rows[0]
-            solution_data = {
-                "solution": s["solution"],
-                "created_at": s["created_at"].isoformat() if s.get("created_at") else None,
-                "created_by": s.get("created_by"),
-            }
+            solution_rows = query(
+                f"SELECT id, solution, created_at, created_by, version, confidence_score, usage_count "
+                f"FROM {TABLE} WHERE {' AND '.join(solution_conditions)} "
+                f"ORDER BY created_at DESC LIMIT 1",
+                tuple(solution_params),
+            )
+            if solution_rows:
+                s = solution_rows[0]
+                solution_data = {
+                    "id": s.get("id"),
+                    "solution": s["solution"],
+                    "created_at": s["created_at"].isoformat() if s.get("created_at") else None,
+                    "created_by": s.get("created_by"),
+                    "version": s.get("version"),
+                    "confidence_score": float(s["confidence_score"]) if s.get("confidence_score") is not None else None,
+                    "usage_count": s.get("usage_count"),
+                }
+        except Exception as e:
+            print(f"[Breaks] solution query error: {e}")
+            solution_error = f"Failed to load solution: {str(e)}"
 
         ai_recommendation = None
         try:
@@ -957,6 +971,7 @@ def get_break_detail(error_hash):
             "status": status,
             "occurrences": serialize_rows(occurrences),
             "solution": solution_data,
+            "solution_error": solution_error,
             "ai_recommendation": ai_recommendation,
         }
         return jsonify(serialize_row(result))

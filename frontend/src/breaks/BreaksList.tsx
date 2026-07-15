@@ -74,6 +74,8 @@ export function BreaksList() {
   const [page, setPage] = useState(1);
   const [result, setResult] = useState<BreaksPage | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [retryTick, setRetryTick] = useState(0);
   const [statusFilter, setStatusFilter] = useState('');
   const [projectFilter, setProjectFilter] = useState('');
   const [projects, setProjects] = useState<string[]>([]);
@@ -82,17 +84,21 @@ export function BreaksList() {
   const [appliedFrom, setAppliedFrom] = useState('');
   const [appliedTo, setAppliedTo] = useState('');
 
-  // Fetch project list from DB
+  // Fetch project list from DB — failure only affects the filter dropdown, not the table
   useEffect(() => {
     apiFetch('/api/projects')
       .then(r => r.json())
       .then((rows: { name: string }[]) => setProjects(rows.map(r => r.name).sort()))
-      .catch(() => {});
+      .catch((e) => {
+        console.error('[Breaks] failed to load project list:', e);
+        // Non-fatal: filter dropdown stays empty, table still loads
+      });
   }, []);
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
+    setLoadError(null);
     const params = new URLSearchParams({
       page: String(page),
       limit: String(LIMIT),
@@ -103,10 +109,26 @@ export function BreaksList() {
     });
     apiFetch(`/api/breaks/grouped?${params}`)
       .then(r => r.json())
-      .then(d => { if (!cancelled) { setResult(d as BreaksPage); setLoading(false); } })
-      .catch(() => { if (!cancelled) setLoading(false); });
+      .then(d => {
+        if (!cancelled) {
+          // Backend returns { error, data, total } on degraded 500 response
+          if (d.error && !d.data) {
+            setLoadError(`Failed to load grouped breaks: ${d.error}`);
+          } else {
+            setResult(d as BreaksPage);
+          }
+          setLoading(false);
+        }
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          console.error('[Breaks] grouped fetch failed:', e);
+          setLoadError('Unable to load grouped breaks. Please try again.');
+          setLoading(false);
+        }
+      });
     return () => { cancelled = true; };
-  }, [page, statusFilter, projectFilter, appliedFrom, appliedTo]);
+  }, [page, statusFilter, projectFilter, appliedFrom, appliedTo, retryTick]);
 
   const totalPages = result ? Math.ceil(result.total / LIMIT) : 1;
 
@@ -184,6 +206,22 @@ export function BreaksList() {
       {loading ? (
         <div data-testid="breaks-loading" style={{ padding: '40px 0', textAlign: 'center', color: 'var(--text-muted)', fontSize: 14 }}>
           Loading…
+        </div>
+      ) : loadError ? (
+        <div style={{
+          padding: '24px 20px', borderRadius: 8, fontSize: 13, textAlign: 'center',
+          background: 'rgba(239,68,68,0.07)', border: '1px solid rgba(239,68,68,0.2)',
+          color: '#f87171',
+        }}>
+          <div style={{ marginBottom: 12 }}>⚠ {loadError}</div>
+          <button
+            onClick={() => setRetryTick(t => t + 1)}
+            style={{
+              padding: '6px 16px', borderRadius: 6, fontSize: 12, fontWeight: 600,
+              background: 'rgba(239,68,68,0.15)', color: '#f87171',
+              border: '1px solid rgba(239,68,68,0.3)', cursor: 'pointer',
+            }}
+          >Retry</button>
         </div>
       ) : (
         <>

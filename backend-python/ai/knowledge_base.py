@@ -1,4 +1,9 @@
-"""Knowledge base helpers for solution versioning, metrics, and FAISS updates."""
+"""Knowledge base helpers — solution versioning, metrics, and Gemini embeddings.
+
+FAISS and SentenceTransformers have been removed.
+Embeddings are now generated via the Gemini Embedding API (ai/embeddings.py).
+Cosine similarity is computed in NumPy (ai/recommendations.py).
+"""
 
 from __future__ import annotations
 
@@ -6,7 +11,6 @@ import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 from ai.embeddings import create_embedding
-from ai.faiss_index import get_faiss_index
 from db import execute, execute_returning, query
 
 
@@ -41,10 +45,12 @@ def _find_solution(solution_id: str) -> Optional[Dict[str, Any]]:
     return rows[0] if rows else None
 
 
+# ── public API ────────────────────────────────────────────────────────────────
+
 def insert_solution(
     error_hash: str,
     solution: str,
-    created_by: str = 'developer',
+    created_by: str = "developer",
     project_name: Optional[str] = None,
     base_solution_id: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -58,15 +64,21 @@ def insert_solution(
         f"WHERE row_type = 'solution' AND log_ref_id = %s",
         (log_ref_id,),
     )
-    version = int(version_rows[0]['max_version'] or 0) + 1
-    usage_count = 1
-    confidence_score = calculate_confidence(usage_count)
+    version       = int(version_rows[0]["max_version"] or 0) + 1
+    usage_count   = 1
+    confidence    = calculate_confidence(usage_count)
 
-    embedding = None
+    # Generate embedding — stored as JSON text in Aurora DSQL (embedding col is text)
+    embedding: Optional[str] = None
     try:
-        embedding = create_embedding(solution)
-    except Exception:
-        pass
+        import json as _json
+        vec = create_embedding(solution)
+        if vec and any(v != 0.0 for v in vec):
+            embedding = _json.dumps(vec)
+        else:
+            print("[KnowledgeBase] embedding skipped (zero vector returned)")
+    except Exception as exc:
+        print(f"[KnowledgeBase] embedding failed (solution saved without it): {exc}")
 
     row = execute_returning(
         f"INSERT INTO {TABLE} "
@@ -83,49 +95,37 @@ def insert_solution(
             created_by,
             usage_count,
             version,
-            confidence_score,
+            confidence,
             embedding,
         ),
     )
-
-    if row and embedding is not None:
-        try:
-            get_faiss_index().add(row['id'], embedding)
-        except Exception:
-            pass
-
     return row
 
 
 def increment_usage(solution_id: str) -> Dict[str, Any]:
     existing = _find_solution(solution_id)
     if not existing:
-        raise ValueError('Solution not found')
+        raise ValueError("Solution not found")
 
-    usage_count = int(existing.get('usage_count') or 0) + 1
-    confidence_score = calculate_confidence(usage_count)
+    usage_count = int(existing.get("usage_count") or 0) + 1
+    confidence  = calculate_confidence(usage_count)
 
     row = execute_returning(
         f"UPDATE {TABLE} SET usage_count = %s, confidence_score = %s "
         f"WHERE row_type = 'solution' AND id = %s RETURNING *",
-        (usage_count, confidence_score, solution_id),
+        (usage_count, confidence, solution_id),
     )
     if not row:
-        raise ValueError('Solution not found')
+        raise ValueError("Solution not found")
     return row
 
 
 def delete_solution_version(solution_id: str) -> int:
-    count = execute(
+    """Delete a single solution version."""
+    return execute(
         f"DELETE FROM {TABLE} WHERE row_type = 'solution' AND id = %s",
         (solution_id,),
     )
-    if count > 0:
-        try:
-            get_faiss_index().remove(solution_id)
-        except Exception:
-            pass
-    return count
 
 
 def get_top_solutions(
@@ -158,7 +158,7 @@ def get_top_solutions(
         f"SELECT COUNT(*) AS total FROM {TABLE} WHERE {where}",
         tuple(params),
     )
-    total = int(total_rows[0]['total']) if total_rows else 0
+    total = int(total_rows[0]["total"]) if total_rows else 0
     return rows, total
 
 
@@ -166,13 +166,12 @@ def get_solution_versions(solution_id: str) -> List[Dict[str, Any]]:
     row = _find_solution(solution_id)
     if not row:
         return []
-    versions = query(
+    return query(
         f"SELECT id, solution, created_by, created_at, usage_count, confidence_score, version "
         f"FROM {TABLE} WHERE row_type = 'solution' AND log_ref_id = %s "
         f"ORDER BY version DESC",
         (row['log_ref_id'],),
     )
-    return versions
 
 
 def get_solution_by_id(solution_id: str) -> Optional[Dict[str, Any]]:

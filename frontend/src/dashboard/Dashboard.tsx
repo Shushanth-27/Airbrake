@@ -179,10 +179,12 @@ export function Dashboard() {
   // ── Top 10 projects ──
   const [topProjects, setTopProjects] = useState<TopProject[]>([]);
   const [topLoading, setTopLoading] = useState(true);
+  const [topError, setTopError] = useState<string | null>(null);
 
   // ── Top 10 error projects ──
   const [topErrorProjects, setTopErrorProjects] = useState<TopProject[]>([]);
   const [topErrorLoading, setTopErrorLoading] = useState(true);
+  const [topErrorProjectsError, setTopErrorProjectsError] = useState<string | null>(null);
 
   const fetchTopProjects = useCallback((from: string, to: string) => {
     const params = new URLSearchParams();
@@ -190,10 +192,14 @@ export function Dashboard() {
     if (to) params.set('to', to);
     const qs = params.toString();
     setTopLoading(true);
+    setTopError(null);
     apiFetch(`/api/dashboard/top-projects${qs ? `?${qs}` : ''}`)
       .then(r => r.json())
       .then((d: any) => setTopProjects(d.projects ?? []))
-      .catch(() => {})
+      .catch((e) => {
+        console.error('[Dashboard] top-projects failed:', e);
+        setTopError('Failed to load top projects.');
+      })
       .finally(() => setTopLoading(false));
   }, []);
 
@@ -203,10 +209,14 @@ export function Dashboard() {
     if (to) params.set('to', to);
     const qs = params.toString();
     setTopErrorLoading(true);
+    setTopErrorProjectsError(null);
     apiFetch(`/api/dashboard/top-error-projects${qs ? `?${qs}` : ''}`)
       .then(r => r.json())
       .then((d: any) => setTopErrorProjects(d.projects ?? []))
-      .catch(() => {})
+      .catch((e) => {
+        console.error('[Dashboard] top-error-projects failed:', e);
+        setTopErrorProjectsError('Failed to load error-producing projects.');
+      })
       .finally(() => setTopErrorLoading(false));
   }, []);
 
@@ -232,12 +242,17 @@ export function Dashboard() {
   const [todayErrors, setTodayErrors] = useState<ErrorRow[]>([]);
   const [todayLoading, setTodayLoading] = useState(true);
   const [todayDate, setTodayDate] = useState('');
+  const [todayError, setTodayError] = useState<string | null>(null);
 
   useEffect(() => {
+    setTodayError(null);
     apiFetch('/api/dashboard/today-errors')
       .then(r => r.json())
       .then((d: any) => { setTodayErrors(d.errors ?? []); setTodayDate(d.date ?? ''); })
-      .catch(() => {})
+      .catch((e) => {
+        console.error('[Dashboard] today-errors failed:', e);
+        setTodayError("Failed to load today's errors.");
+      })
       .finally(() => setTodayLoading(false));
   }, []);
 
@@ -364,6 +379,15 @@ export function Dashboard() {
 
         {topLoading || topErrorLoading ? (
           <div style={{ textAlign: 'center', padding: '60px 0', color: 'var(--text-muted)', fontSize: 13 }}>Loading…</div>
+        ) : (topError || topErrorProjectsError) ? (
+          <div style={{
+            padding: '18px 20px', borderRadius: 8, fontSize: 13,
+            background: 'rgba(239,68,68,0.07)', border: '1px solid rgba(239,68,68,0.2)',
+            color: '#f87171',
+          }}>
+            {topError && <div>⚠ Most used projects — {topError}</div>}
+            {topErrorProjectsError && <div style={{ marginTop: topError ? 6 : 0 }}>⚠ Error-producing projects — {topErrorProjectsError}</div>}
+          </div>
         ) : comparisonData.length === 0 ? (
           <div style={{ textAlign: 'center', padding: '60px 0', color: 'var(--text-muted)', fontSize: 13 }}>No project data available.</div>
         ) : (
@@ -441,6 +465,14 @@ export function Dashboard() {
         </div>
         {todayLoading ? (
           <div style={{ textAlign: 'center', padding: '30px 0', color: 'var(--text-muted)', fontSize: 13 }}>Loading today's errors…</div>
+        ) : todayError ? (
+          <div style={{
+            padding: '18px 20px', borderRadius: 8, fontSize: 13,
+            background: 'rgba(239,68,68,0.07)', border: '1px solid rgba(239,68,68,0.2)',
+            color: '#f87171',
+          }}>
+            ⚠ {todayError}
+          </div>
         ) : (
           <ErrorTable rows={todayErrors} emptyMsg="No errors today — all systems running clean." />
         )}
