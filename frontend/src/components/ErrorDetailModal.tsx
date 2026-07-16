@@ -330,11 +330,12 @@ export function ErrorDetailModal({ row, errorHash, projectName: projectNameProp,
           </div>
         )}
 
-        <div>
-          <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 10 }}>
-            Stack Trace
-          </div>
-          {errorDetail ? (
+        {/* Stack Trace — only rendered when errorDetail actually exists */}
+        {errorDetail && (
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 10 }}>
+              Stack Trace
+            </div>
             <pre style={{
               margin: 0, fontFamily: 'ui-monospace, monospace', fontSize: 12,
               lineHeight: 1.8, color: '#fca5a5',
@@ -345,70 +346,64 @@ export function ErrorDetailModal({ row, errorHash, projectName: projectNameProp,
             }}>
               {errorDetail}
             </pre>
-          ) : (
-            <div style={{ textAlign: 'center', padding: '40px 0', color: 'var(--text-muted)', fontSize: 13,
-              background: 'rgba(255,255,255,0.02)', border: '1px solid var(--card-border)', borderRadius: 8 }}>
-              <div style={{ fontSize: 28, marginBottom: 8 }}>📭</div>
-              No detailed error information available for this entry.
-            </div>
-          )}
+          </div>
+        )}
 
-          {data?.ai_recommendation?.recommendation && (
-            <div style={{ marginTop: 14, padding: 16, borderRadius: 10, background: 'rgba(56,189,248,0.08)', border: '1px solid rgba(56,189,248,0.2)' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-                <span style={{ fontSize: 14 }}>🤖</span>
-                <span style={{ fontSize: 12, fontWeight: 700, color: '#38bdf8', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                  AI Recommendation
-                </span>
-              </div>
-              <div style={{ fontSize: 14, lineHeight: 1.6, color: '#0f172a' }}>
-                {data.ai_recommendation.recommendation}
-              </div>
+        {data?.ai_recommendation?.recommendation && (
+          <div style={{ padding: 16, borderRadius: 10, background: 'rgba(56,189,248,0.08)', border: '1px solid rgba(56,189,248,0.2)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+              <span style={{ fontSize: 14 }}>🤖</span>
+              <span style={{ fontSize: 12, fontWeight: 700, color: '#38bdf8', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                AI Recommendation
+              </span>
             </div>
-          )}
+            <div style={{ fontSize: 14, lineHeight: 1.6, color: '#0f172a' }}>
+              {data.ai_recommendation.recommendation}
+            </div>
+          </div>
+        )}
 
-          {data?.solution?.solution && (
-            <div style={{ marginTop: 14, padding: 16, borderRadius: 10, background: 'rgba(99,102,241,0.08)', border: '1px solid rgba(99,102,241,0.2)' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-                <span style={{ fontSize: 14 }}>💡</span>
-                <span style={{ fontSize: 12, fontWeight: 700, color: '#818cf8', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                  Suggested solution from knowledge base
-                </span>
-              </div>
-              <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: 'var(--text)', fontSize: 13, lineHeight: 1.7 }}>
-                {data.solution.solution}
-              </div>
-              <div style={{ marginTop: 10, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', fontSize: 12, color: 'var(--text-muted)' }}>
-                {data.solution.created_by && <span>Developer: {data.solution.created_by}</span>}
-                {data.solution.created_at && <span>Created: {fmt(data.solution.created_at)}</span>}
-                {typeof data.solution.confidence_score === 'number' && <span>Confidence: {data.solution.confidence_score.toFixed(2)}</span>}
-                {typeof data.solution.usage_count === 'number' && <span>Usage: {data.solution.usage_count}</span>}
-                {typeof data.solution.version === 'number' && <span>Version: {data.solution.version}</span>}
-              </div>
-              <div style={{ marginTop: 12, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                <button onClick={handleUseSolution} disabled={saving} style={{ ...btnPrimary, padding: '6px 12px' }}>Use Solution</button>
-                <button onClick={handleImproveSolution} style={{ ...btnSecondary, padding: '6px 12px' }}>Improve Solution</button>
-                <button onClick={handleShowVersions} disabled={loadingVersions} style={{ ...btnSecondary, padding: '6px 12px' }}>{loadingVersions ? 'Loading…' : (showVersions ? 'Hide Versions' : 'Show Versions')}</button>
-                <button onClick={handleDelete} disabled={saving} style={{ padding: '6px 12px', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: saving ? 'not-allowed' : 'pointer', background: 'rgba(239,68,68,0.1)', color: '#f87171', border: '1px solid rgba(239,68,68,0.25)' }}>Delete</button>
-              </div>
-              {solutionActionError && <div style={{ marginTop: 10, fontSize: 12, color: '#f87171' }}>{solutionActionError}</div>}
-              {showVersions && (
-                <div style={{ marginTop: 12, padding: 12, borderRadius: 8, border: '1px solid var(--card-border)', background: 'rgba(255,255,255,0.03)' }}>
-                  {versions.length === 0 ? <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>No other versions yet.</div> : versions.map((version) => (
-                    <div key={version.id} style={{ padding: '8px 0', borderBottom: '1px solid var(--card-border)' }}>
-                      <div style={{ fontSize: 12, color: 'var(--text)', marginBottom: 6 }}>Version {version.version ?? 1}</div>
-                      <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 6 }}>{version.solution}</div>
-                      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', fontSize: 11 }}>
-                        <button onClick={() => handleUseVersion(version.id)} style={{ ...btnPrimary, padding: '5px 10px' }}>Use Version</button>
-                        <button onClick={() => handleDeleteVersion(version.id)} style={{ ...btnSecondary, padding: '5px 10px' }}>Delete Version</button>
-                      </div>
+        {data?.solution?.solution && (
+          <div style={{ padding: 16, borderRadius: 10, background: 'rgba(99,102,241,0.08)', border: '1px solid rgba(99,102,241,0.2)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+              <span style={{ fontSize: 14 }}>💡</span>
+              <span style={{ fontSize: 12, fontWeight: 700, color: '#818cf8', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                Suggested solution from knowledge base
+              </span>
+            </div>
+            <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: 'var(--text)', fontSize: 13, lineHeight: 1.7 }}>
+              {data.solution.solution}
+            </div>
+            <div style={{ marginTop: 10, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', fontSize: 12, color: 'var(--text-muted)' }}>
+              {data.solution.created_by && <span>Developer: {data.solution.created_by}</span>}
+              {data.solution.created_at && <span>Created: {fmt(data.solution.created_at)}</span>}
+              {typeof data.solution.confidence_score === 'number' && <span>Confidence: {data.solution.confidence_score.toFixed(2)}</span>}
+              {typeof data.solution.usage_count === 'number' && <span>Usage: {data.solution.usage_count}</span>}
+              {typeof data.solution.version === 'number' && <span>Version: {data.solution.version}</span>}
+            </div>
+            <div style={{ marginTop: 12, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <button onClick={handleUseSolution} disabled={saving} style={{ ...btnPrimary, padding: '6px 12px' }}>Use Solution</button>
+              <button onClick={handleImproveSolution} style={{ ...btnSecondary, padding: '6px 12px' }}>Improve Solution</button>
+              <button onClick={handleShowVersions} disabled={loadingVersions} style={{ ...btnSecondary, padding: '6px 12px' }}>{loadingVersions ? 'Loading…' : (showVersions ? 'Hide Versions' : 'Show Versions')}</button>
+              <button onClick={handleDelete} disabled={saving} style={{ padding: '6px 12px', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: saving ? 'not-allowed' : 'pointer', background: 'rgba(239,68,68,0.1)', color: '#f87171', border: '1px solid rgba(239,68,68,0.25)' }}>Delete</button>
+            </div>
+            {solutionActionError && <div style={{ marginTop: 10, fontSize: 12, color: '#f87171' }}>{solutionActionError}</div>}
+            {showVersions && (
+              <div style={{ marginTop: 12, padding: 12, borderRadius: 8, border: '1px solid var(--card-border)', background: 'rgba(255,255,255,0.03)' }}>
+                {versions.length === 0 ? <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>No other versions yet.</div> : versions.map((version) => (
+                  <div key={version.id} style={{ padding: '8px 0', borderBottom: '1px solid var(--card-border)' }}>
+                    <div style={{ fontSize: 12, color: 'var(--text)', marginBottom: 6 }}>Version {version.version ?? 1}</div>
+                    <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 6 }}>{version.solution}</div>
+                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', fontSize: 11 }}>
+                      <button onClick={() => handleUseVersion(version.id)} style={{ ...btnPrimary, padding: '5px 10px' }}>Use Version</button>
+                      <button onClick={() => handleDeleteVersion(version.id)} style={{ ...btnSecondary, padding: '5px 10px' }}>Delete Version</button>
                     </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
         <div>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>

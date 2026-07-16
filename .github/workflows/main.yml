@@ -90,7 +90,6 @@ jobs:
           cp app.py             package/
           cp db.py              package/
           cp lambda_function.py package/
-          cp teams.py           package/
 
           # Complete ai/ package (knowledge_base, recommendations, embeddings, llm, etc.)
           cp -r ai/ package/ai/
@@ -104,7 +103,6 @@ jobs:
             package/app.py \
             package/db.py \
             package/lambda_function.py \
-            package/teams.py \
             package/ai/__init__.py \
             package/ai/knowledge_base.py \
             package/ai/recommendations.py \
