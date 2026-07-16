@@ -22,6 +22,9 @@ from db import query, execute, execute_returning
 # ── Knowledge base functions (DB only, no AI runtime required) ────────────────
 # These are always imported directly — they handle Gemini failures internally.
 KB_AVAILABLE = False
+_kb_import_err = None          # always defined — stubs reference this safely
+_kb_import_tb  = ""
+
 try:
     from ai.knowledge_base import (
         delete_solution_version,
@@ -31,12 +34,21 @@ try:
         insert_solution,
     )
     KB_AVAILABLE = True
-except Exception as _kb_import_err:
-    import traceback as _tb
-    print(f"[app] WARNING: knowledge_base import failed: {_kb_import_err}")
-    _tb.print_exc()
-    def insert_solution(*a, **kw): raise RuntimeError(f"Knowledge Base unavailable: {_kb_import_err}")
-    def increment_usage(*a, **kw): raise RuntimeError(f"Knowledge Base unavailable: {_kb_import_err}")
+except Exception as _e:
+    import traceback as _tb_mod
+    _kb_import_err = _e
+    _kb_import_tb  = _tb_mod.format_exc()
+    print(f"[app] CRITICAL: knowledge_base import failed — {type(_e).__name__}: {_e}")
+    print(_kb_import_tb)
+
+    def insert_solution(*a, **kw):
+        raise RuntimeError(
+            f"Knowledge Base unavailable — {type(_kb_import_err).__name__}: {_kb_import_err}"
+        )
+    def increment_usage(*a, **kw):
+        raise RuntimeError(
+            f"Knowledge Base unavailable — {type(_kb_import_err).__name__}: {_kb_import_err}"
+        )
     def get_top_solutions(*a, **kw): return [], 0
     def get_solution_versions(*a, **kw): return []
     def delete_solution_version(*a, **kw): return 0
@@ -167,6 +179,19 @@ def debug_columns():
         ORDER BY ordinal_position
     """)
     return jsonify({"columns": [r["column_name"] for r in rows], "count": len(rows)})
+
+
+@app.route("/api/debug/kb-status")
+def debug_kb_status():
+    """Debug endpoint — shows Knowledge Base and AI import status.
+    Visible directly in browser: GET /api/debug/kb-status
+    """
+    return jsonify({
+        "kb_available": KB_AVAILABLE,
+        "ai_recommendations_available": AI_RECOMMENDATIONS_AVAILABLE,
+        "kb_import_error": str(_kb_import_err) if _kb_import_err else None,
+        "kb_import_traceback": _kb_import_tb if _kb_import_tb else None,
+    })
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1177,14 +1202,17 @@ def upsert_error_solution():
         row = insert_solution(error_hash, solution, created_by=created_by, project_name=project_name, base_solution_id=base_solution_id)
         return jsonify(serialize_row(row)), 201
     except Exception as e:
-        import traceback as _tb
-        tb_str = _tb.format_exc()
+        import traceback as _tb2
+        tb_str = _tb2.format_exc()
         print(f"[KnowledgeBase] Save Solution FAILED — {type(e).__name__}: {e}")
         print(tb_str)
         return jsonify({
             "error": str(e),
             "exception": type(e).__name__,
             "traceback": tb_str,
+            "kb_available": KB_AVAILABLE,
+            "kb_import_error": str(_kb_import_err) if _kb_import_err else None,
+            "kb_import_traceback": _kb_import_tb if _kb_import_tb else None,
         }), 500
 
 
