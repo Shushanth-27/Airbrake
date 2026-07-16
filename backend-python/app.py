@@ -613,9 +613,8 @@ def ingest_error():
 
     actual_name = _validate_project(project_name)
     opt = _parse_optional(body)
-    error_hash = hashlib.md5(
-        f'{error.lower().strip()}:{time.time()}:{random.random()}'.encode()
-    ).hexdigest()
+    # Hash based only on error message so identical errors group together
+    error_hash = hashlib.md5(error.lower().strip().encode()).hexdigest()
 
     try:
         inserted = _insert_result(
@@ -646,8 +645,9 @@ def ingest_log():
     is_workflow = error.startswith("{") and ("workflowId" in error or "workflowStatus" in error)
     is_error = bool(error) and not is_workflow
 
+    # Hash based only on error message so identical errors group together
     error_hash = (
-        hashlib.md5(f'{error.lower().strip()}:{time.time()}:{random.random()}'.encode()).hexdigest()
+        hashlib.md5(error.lower().strip().encode()).hexdigest()
         if is_error else None
     )
     success_count = body.get("success_count", 0 if is_error else 1)
@@ -854,7 +854,7 @@ def breaks_grouped():
             f"COALESCE(error_hash, MD5(LOWER(TRIM(error)))) AS error_hash, "
             f"SUM(failure_count)::int AS occurrence_count, "
             f"MIN(timestamp) AS first_seen, "
-            f"COALESCE(MAX(reopened_at), MAX(timestamp)) AS last_seen, "
+            f"GREATEST(MAX(timestamp), MAX(COALESCE(reopened_at, timestamp))) AS last_seen, "
             f"CASE "
             f"  WHEN BOOL_OR(error_status = 'reopened') THEN 'regression' "
             f"  WHEN SUM(failure_count) = 1 THEN 'new' "
@@ -951,7 +951,10 @@ def get_break_detail(error_hash):
         first = error_rows[0]
         occurrence_count = sum(r.get("failure_count", 1) for r in error_rows)
         first_seen = min(r["timestamp"] for r in error_rows if r.get("timestamp"))
-        last_seen = max(r.get("reopened_at") or r["timestamp"] for r in error_rows if r.get("timestamp"))
+        last_seen = max(
+            max((r["timestamp"] for r in error_rows if r.get("timestamp")), default=None),
+            max((r["reopened_at"] for r in error_rows if r.get("reopened_at")), default=None),
+        )
         file_name = next((r.get("file_name") for r in error_rows if r.get("file_name")), first.get("file_name"))
 
         has_reopened = any(r.get("error_status") == "reopened" for r in error_rows)
