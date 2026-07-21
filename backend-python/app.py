@@ -404,7 +404,7 @@ def project_logs(name):
             f"error_status, resolved_at, reopened_at "
             f"FROM {TABLE} WHERE row_type = 'log' AND LOWER(project_name) = LOWER(%s) "
             f"ORDER BY timestamp DESC LIMIT 500",
-            (actual_name,),
+            (project_name,),
         )
         total = len(logs)
         success = sum(1 for r in logs if not r.get("error"))
@@ -423,14 +423,25 @@ def project_logs(name):
         visible_logs = serialize_rows(visible_logs)
         errors = serialize_rows(errors)
         return jsonify({
-            "exists": True, "tableName": actual_name.replace(" ", "_"),
+            "exists": True, "tableName": project_name.replace(" ", "_"),
             "total": total, "filesProcessed": total,
             "success": success, "failure": failure,
             "totalCost": total_cost, "errors": errors, "logs": visible_logs,
         })
     except Exception as e:
-        print(f"[Projects] logs error: {e}")
-        return jsonify({"error": "Internal server error"}), 500
+        import traceback as _tb
+        tb_str = _tb.format_exc()
+        request_id = g.get("request_id", "unknown")
+        print(f"[req:{request_id}] [Projects:logs] ERROR: {type(e).__name__}: {e}")
+        print(f"[req:{request_id}] [Projects:logs] Traceback:\n{tb_str}")
+        return jsonify({
+            "success": False,
+            "exists": False,
+            "error": "Failed to load logs",
+            "data": [],
+            "trace_id": request_id,
+            "fallback": True,
+        }), 200
 
 
 @app.route("/api/projects/<path:name>/errors", methods=["POST"])
@@ -1009,6 +1020,7 @@ def get_break_detail(error_hash):
 
         # Get grouped error info
         conditions = [
+            "row_type = 'log'",
             "error IS NOT NULL",
             "error <> ''",
         ]
@@ -1029,7 +1041,7 @@ def get_break_detail(error_hash):
             "SELECT project_name, error AS error_message, error_detail, error_hash, "
             "failure_count, timestamp, error_status, reopened_at, file_name "
             f"FROM {TABLE} "
-            f"WHERE row_type = 'log' AND {' AND '.join(conditions)} "
+            f"WHERE {' AND '.join(conditions)} "
             "ORDER BY timestamp DESC",
             tuple(params),
         )
@@ -1127,8 +1139,17 @@ def get_break_detail(error_hash):
         }
         return jsonify(serialize_row(result))
     except Exception as e:
-        print(f"[Breaks] detail error: {e}")
-        return jsonify({"error": "Internal server error"}), 500
+        import traceback as _tb
+        tb_str = _tb.format_exc()
+        request_id = g.get("request_id", "unknown")
+        print(f"[req:{request_id}] [Breaks:detail] ERROR: {type(e).__name__}: {e}")
+        print(f"[req:{request_id}] [Breaks:detail] error_hash={error_hash} project_name={project_name}")
+        print(f"[req:{request_id}] [Breaks:detail] Traceback:\n{tb_str}")
+        return jsonify({
+            "error": "Not Found",
+            "message": "Error not found or failed to load.",
+            "trace_id": request_id,
+        }), 404
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
