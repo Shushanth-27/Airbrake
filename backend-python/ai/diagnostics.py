@@ -42,9 +42,22 @@ def get_ai_diagnostics() -> Dict[str, Any]:
     pinecone_config = {
         "api_key_configured": bool(os.getenv("PINECONE_API_KEY")),
         "host_configured": bool(os.getenv("PINECONE_HOST")),
-        "index": os.getenv("PINECONE_INDEX") or "airbrake",
+        "index": os.getenv("PINECONE_INDEX") or "airbrake-rag",
+        "namespace": os.getenv("PINECONE_NAMESPACE") or "default",
         "environment": os.getenv("PINECONE_ENVIRONMENT") or "",
     }
+
+    required_bedrock_vars = [
+        "BEDROCK_REGION",
+        "BEDROCK_EMBEDDING_MODEL_ID",
+        "BEDROCK_NOVA_MODEL_ID",
+    ]
+    required_pinecone_vars = [
+        "PINECONE_API_KEY",
+        "PINECONE_INDEX",
+    ]
+    missing_bedrock = [name for name in required_bedrock_vars if not os.getenv(name)]
+    missing_pinecone = [name for name in required_pinecone_vars if not os.getenv(name)]
 
     aurora_status = {"available": False, "error": None, "traceback": None}
     try:
@@ -67,20 +80,37 @@ def get_ai_diagnostics() -> Dict[str, Any]:
             "traceback": traceback.format_exc(),
         }
 
+    bedrock_connected = bool(imports.get("ai.bedrock_embeddings", {}).get("available", False) and imports.get("ai.bedrock_llm", {}).get("available", False))
+    pinecone_connected = bool(imports.get("ai.pinecone_service", {}).get("available", False) and pinecone_config["api_key_configured"])
+
     return {
         "status": "degraded" if not all(item.get("available", False) for item in imports.values()) else "ok",
         "imports": imports,
         "bedrock": {
-            "available": imports.get("ai.bedrock_embeddings", {}).get("available", False) and imports.get("ai.bedrock_llm", {}).get("available", False),
-            **bedrock_config,
+            "connected": bedrock_connected,
+            "model": bedrock_config["embedding_model_id"],
+            "embedding_dimension": bedrock_config["embedding_dimensions"],
+            "details": bedrock_config,
         },
         "pinecone": {
-            "available": imports.get("ai.pinecone_service", {}).get("available", False),
-            **pinecone_config,
+            "connected": pinecone_connected,
+            "index": pinecone_config["index"],
+            "namespace": pinecone_config["namespace"],
+            "record_count": None,
+            "last_error": None,
+            "details": pinecone_config,
         },
-        "aurora": aurora_status,
+        "aurora": {"connected": aurora_status["available"], "error": aurora_status.get("error"), "traceback": aurora_status.get("traceback")},
+        "environment": {
+            "region": bedrock_config["region"],
+            "embedding_model": bedrock_config["embedding_model_id"],
+            "nova_model": bedrock_config["nova_model_id"],
+            "pinecone_index": pinecone_config["index"],
+        },
         "configuration": {
             "bedrock_configured": bedrock_config["configured"],
             "pinecone_configured": pinecone_config["api_key_configured"],
+            "missing_bedrock_variables": missing_bedrock,
+            "missing_pinecone_variables": missing_pinecone,
         },
     }

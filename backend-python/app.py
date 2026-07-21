@@ -16,7 +16,7 @@ import json
 import time
 import random
 from datetime import datetime, timezone
-from flask import Flask, request, jsonify, make_response
+from flask import Flask, request, jsonify, make_response, g
 
 try:
     from db import query, execute, execute_returning
@@ -44,6 +44,15 @@ try:
 except Exception as exc:  # pragma: no cover - import safety
     def get_ai_diagnostics():
         return {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
+
+try:
+    from ai.error_matching import build_error_hash_candidates, derive_error_hash, normalize_project_name
+except Exception as exc:  # pragma: no cover - import safety
+    def derive_error_hash(error_text, error_detail=None):
+        return hashlib.md5((error_detail or error_text or '').strip().lower().encode('utf-8')).hexdigest()
+
+    def normalize_project_name(project_name):
+        return (project_name or '').strip().lower().replace('_', ' ')
 
 # ── Knowledge base functions (DB only, no AI runtime required) ────────────────
 # These are always imported directly — they handle AI runtime failures internally.
@@ -93,6 +102,14 @@ app = Flask(__name__)
 app.config["JSON_SORT_KEYS"] = False
 
 
+@app.before_request
+def attach_request_context():
+    request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    g.request_id = request_id
+    g.request_started_at = time.monotonic()
+    print(f"[req:{request_id}] {request.method} {request.path}")
+
+
 @app.errorhandler(Exception)
 def handle_unexpected_error(exc):
     import traceback as _tb_mod
@@ -132,6 +149,9 @@ def add_cors_headers(response):
     response.headers["Access-Control-Max-Age"] = "86400"
     if origin in ALLOWED_ORIGINS:
         response.headers["Vary"] = "Origin"
+    if hasattr(g, "request_started_at"):
+        elapsed_ms = (time.monotonic() - g.request_started_at) * 1000
+        print(f"[req:{getattr(g, 'request_id', 'n/a')}] completed status={response.status_code} elapsed_ms={elapsed_ms:.2f}")
     return response
 
 
@@ -195,6 +215,21 @@ def serialize_rows(rows):
     return [serialize_row(r) for r in rows]
 
 
+def _resolve_project_name(project_name):
+    if not project_name:
+        return None
+    candidate = str(project_name).strip()
+    if not candidate:
+        return None
+    rows = query(
+        f"SELECT project_name AS name FROM {TABLE} WHERE row_type = 'project' ORDER BY project_name"
+    )
+    for row in rows:
+        if normalize_project_name(row.get("name")) == normalize_project_name(candidate):
+            return row.get("name")
+    return candidate
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # SYSTEM
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -251,9 +286,13 @@ def debug_ai_health():
         import traceback as _tb_mod
         return jsonify({
             "status": "error",
+            "bedrock": {"connected": False, "model": None, "embedding_dimension": None},
+            "pinecone": {"connected": False, "index": None, "namespace": None, "record_count": None, "last_error": f"{type(exc).__name__}: {exc}"},
+            "aurora": {"connected": False},
+            "environment": {"region": None, "embedding_model": None, "nova_model": None, "pinecone_index": None},
             "error": f"{type(exc).__name__}: {exc}",
             "traceback": _tb_mod.format_exc(),
-        }), 500
+        })
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -359,7 +398,6 @@ def project_logs(name):
                 "totalCost": None, "errors": [], "logs": [],
             })
 
-        actual_name = proj[0]["name"]
         logs = query(
             f"SELECT file_name, timestamp, success_count, failure_count, error, "
             f"llm_usage, input_tokens, output_tokens, calculated_cost, word_count, file_type, "
@@ -400,14 +438,9 @@ def upsert_project_error(name):
     project_name = name
     try:
         # Verify project exists
-        proj = query(
-            f"SELECT project_name AS name FROM {TABLE} "
-            f"WHERE row_type = 'project' AND LOWER(project_name) = LOWER(%s)",
-            (project_name,),
-        )
-        if not proj:
+        actual_name = _resolve_project_name(project_name)
+        if not actual_name:
             return jsonify({"error": f"No project found: {project_name}"}), 404
-        actual_name = proj[0]["name"]
 
         body = request.get_json() or {}
         file_name = str(body.get("file_name", ""))
@@ -424,7 +457,7 @@ def upsert_project_error(name):
         if not short_error:
             return jsonify({"error": "error or error_detail is required"}), 400
 
-        error_hash = hashlib.md5(short_error.lower().strip().encode()).hexdigest()
+        error_hash = derive_error_hash(short_error, error_detail)
 
         # Try to update existing row with same error_hash
         updated = execute_returning(
@@ -460,14 +493,9 @@ def upsert_project_error(name):
 @app.route("/api/projects/<path:name>/errors/<hash>/resolve", methods=["PATCH"])
 def resolve_project_error(name, hash):
     try:
-        proj = query(
-            f"SELECT project_name AS name FROM {TABLE} "
-            f"WHERE row_type = 'project' AND LOWER(project_name) = LOWER(%s)",
-            (name,),
-        )
-        if not proj:
+        actual_name = _resolve_project_name(name)
+        if not actual_name:
             return jsonify({"error": f"No project found: {name}"}), 404
-        actual_name = proj[0]["name"]
         execute(
             f"UPDATE {TABLE} SET error_status = %s, resolved_at = NOW(), "
             f"reopened_at = NULL WHERE row_type = 'log' AND error_hash = %s "
@@ -675,8 +703,7 @@ def ingest_error():
 
     actual_name = _validate_project(project_name)
     opt = _parse_optional(body)
-    # Hash based only on error message so identical errors group together
-    error_hash = hashlib.md5(error.lower().strip().encode()).hexdigest()
+    error_hash = derive_error_hash(error, opt.get("error_detail"))
 
     try:
         inserted = _insert_result(
@@ -707,11 +734,7 @@ def ingest_log():
     is_workflow = error.startswith("{") and ("workflowId" in error or "workflowStatus" in error)
     is_error = bool(error) and not is_workflow
 
-    # Hash based only on error message so identical errors group together
-    error_hash = (
-        hashlib.md5(error.lower().strip().encode()).hexdigest()
-        if is_error else None
-    )
+    error_hash = derive_error_hash(error, opt.get("error_detail")) if is_error else None
     success_count = body.get("success_count", 0 if is_error else 1)
     failure_count = body.get("failure_count", 1 if is_error else 0)
 
@@ -798,7 +821,6 @@ def dashboard_top_error_projects():
         conditions = [
             "row_type = 'log'",
             "error IS NOT NULL", "error <> ''",
-            "error_status IN ('open', 'reopened')",
         ]
         params = []
         if from_ts:
@@ -830,7 +852,6 @@ def dashboard_today_errors():
             f"error_detail, error_hash, timestamp "
             f"FROM {TABLE} "
             f"WHERE row_type = 'log' AND error IS NOT NULL AND error <> '' "
-            f"AND error_status IN ('open', 'reopened') "
             f"AND ("
             f"  (timestamp AT TIME ZONE 'UTC' >= CURRENT_DATE "
             f"   AND timestamp AT TIME ZONE 'UTC' < CURRENT_DATE + INTERVAL '1 day')"
@@ -854,7 +875,6 @@ def dashboard_errors():
         conditions = [
             "row_type = 'log'",
             "error IS NOT NULL", "error <> ''",
-            "error_status IN ('open', 'reopened')",
         ]
         params = []
         if from_ts:
@@ -894,7 +914,6 @@ def breaks_grouped():
         conditions = [
             "row_type = 'log'",
             "error IS NOT NULL", "error <> ''",
-            "error_status IN ('open', 'reopened')",
         ]
         params = []
 
@@ -990,11 +1009,18 @@ def get_break_detail(error_hash):
 
         # Get grouped error info
         conditions = [
-            "(error_hash = %s OR MD5(LOWER(TRIM(error))) = %s)",
             "error IS NOT NULL",
             "error <> ''",
         ]
-        params = [error_hash, error_hash]
+        params = []
+        hash_candidates = build_error_hash_candidates(error_hash, None)
+        if error_hash:
+            hash_clauses = []
+            for idx, candidate in enumerate(hash_candidates):
+                hash_clauses.append(f"error_hash = %s")
+                params.append(candidate)
+            if hash_clauses:
+                conditions.append(f"({' OR '.join(hash_clauses)})")
         if project_name:
             conditions.insert(0, "LOWER(project_name) = LOWER(%s)")
             params.insert(0, project_name)
@@ -1049,6 +1075,14 @@ def get_break_detail(error_hash):
                 solution_conditions.append("LOWER(project_name) = LOWER(%s)")
                 solution_params.append(project_name)
 
+            if error_hash:
+                candidate_clauses = []
+                for candidate in build_error_hash_candidates(error_hash, None):
+                    candidate_clauses.append("error_hash = %s")
+                    solution_params.append(candidate)
+                if candidate_clauses:
+                    solution_conditions[1] = f"({' OR '.join(candidate_clauses)})"
+
             solution_rows = query(
                 f"SELECT id, solution, created_at, created_by, version, confidence_score, usage_count "
                 f"FROM {TABLE} WHERE {' AND '.join(solution_conditions)} "
@@ -1085,6 +1119,7 @@ def get_break_detail(error_hash):
             "occurrence_count": occurrence_count,
             "first_seen": first_seen,
             "status": status,
+            "error_status": first.get("error_status"),
             "occurrences": serialize_rows(occurrences),
             "solution": solution_data,
             "solution_error": solution_error,
@@ -1116,13 +1151,11 @@ def dashboard_legacy():
         last24h = safe_count(
             f"SELECT COUNT(*) AS count FROM {TABLE} "
             f"WHERE row_type = 'log' AND error IS NOT NULL AND error <> '' "
-            f"AND error_status IN ('open', 'reopened') "
             f"AND timestamp >= NOW() - INTERVAL '24 hours'"
         )
         last7d = safe_count(
             f"SELECT COUNT(*) AS count FROM {TABLE} "
             f"WHERE row_type = 'log' AND error IS NOT NULL AND error <> '' "
-            f"AND error_status IN ('open', 'reopened') "
             f"AND timestamp >= NOW() - INTERVAL '7 days'"
         )
 
@@ -1150,6 +1183,27 @@ def dashboard_legacy():
 # ═══════════════════════════════════════════════════════════════════════════════
 # ERROR SOLUTIONS / KNOWLEDGE BASE
 # ═══════════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/knowledge_base/reopen", methods=["POST"])
+def reopen_error_solution():
+    body = request.get_json() or {}
+    error_hash = body.get("error_hash")
+    project_name = body.get("project_name")
+    if not error_hash or not project_name:
+        return jsonify({"error": "error_hash and project_name are required"}), 400
+    try:
+        count = execute(
+            f"UPDATE {TABLE} SET error_status = 'reopened', reopened_at = NOW(), resolved_at = NULL "
+            f"WHERE row_type = 'log' AND error_hash = %s AND LOWER(project_name) = LOWER(%s) "
+            f"AND error_status IN ('resolved', 'reopened')",
+            (error_hash, project_name),
+        )
+        return jsonify({"reopened": count, "project_name": project_name, "error_hash": error_hash})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
 
 @app.route("/api/knowledge_base/resolve", methods=["POST"])
 def resolve_error_solution():
@@ -1233,11 +1287,13 @@ def get_top_solutions_route():
 @app.route("/api/knowledge_base/<error_hash>", methods=["GET"])
 def get_error_solution(error_hash):
     try:
+        hash_candidates = build_error_hash_candidates(error_hash, None)
+        params = list(hash_candidates) if hash_candidates else [error_hash]
         rows = query(
             f"SELECT solution, created_at "
-            f"FROM {TABLE} WHERE row_type = 'solution' AND error_hash = %s "
+            f"FROM {TABLE} WHERE row_type = 'solution' AND (" + " OR ".join(["error_hash = %s"] * len(params)) + ") "
             f"ORDER BY created_at DESC LIMIT 1",
-            (error_hash,),
+            tuple(params),
         )
         if not rows:
             return jsonify({"solution": None})
@@ -1263,9 +1319,20 @@ def upsert_error_solution():
         return jsonify({"error": "error_hash is required"}), 400
     if not solution:
         return jsonify({"error": "solution is required"}), 400
+    check_only = bool(body.get("check_only"))
+    force_create = bool(body.get("create_anyway") or body.get("force_create"))
     try:
-        row = insert_solution(error_hash, solution, created_by=created_by, project_name=project_name, base_solution_id=base_solution_id)
-        return jsonify(serialize_row(row)), 201
+        row = insert_solution(
+            error_hash,
+            solution,
+            created_by=created_by,
+            project_name=project_name,
+            base_solution_id=base_solution_id,
+            force_create=force_create,
+            check_only=check_only,
+        )
+        status_code = 200 if check_only else 201
+        return jsonify(serialize_row(row)), status_code
     except Exception as e:
         import traceback as _tb2
         tb_str = _tb2.format_exc()
@@ -1283,11 +1350,18 @@ def upsert_error_solution():
 
 @app.route("/api/knowledge_base/<error_hash>", methods=["DELETE"])
 def delete_error_solution(error_hash):
+    project_name = request.args.get("project_name")
     try:
-        execute(
-            f"DELETE FROM {TABLE} WHERE row_type = 'solution' AND error_hash = %s",
-            (error_hash,),
-        )
+        if project_name:
+            execute(
+                f"DELETE FROM {TABLE} WHERE row_type = 'solution' AND error_hash = %s AND LOWER(project_name) = LOWER(%s)",
+                (error_hash, project_name),
+            )
+        else:
+            execute(
+                f"DELETE FROM {TABLE} WHERE row_type = 'solution' AND error_hash = %s",
+                (error_hash,),
+            )
         return make_response("", 204)
     except Exception as e:
         import traceback; traceback.print_exc()

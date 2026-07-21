@@ -39,6 +39,19 @@ interface AiRecommendation {
   solutions: SimilarSolution[];
 }
 
+interface DuplicatePromptState {
+  mode: 'save' | 'improve';
+  decision?: string | null;
+  similarity?: number | null;
+  solution_id?: string | null;
+  solution?: string | null;
+  created_by?: string | null;
+  created_at?: string | null;
+  version?: number | null;
+  confidence_score?: number | null;
+  usage_count?: number | null;
+}
+
 interface ErrorDetailData {
   project_name: string;
   file_name?: string | null;
@@ -49,6 +62,7 @@ interface ErrorDetailData {
   first_seen: string | null;
   last_seen: string | null;
   status: 'new' | 'existing' | 'regression';
+  error_status?: string | null;
   occurrences: Occurrence[];
   solution: SolutionData | null;
   ai_recommendation?: AiRecommendation | null;
@@ -100,6 +114,7 @@ export function ErrorDetailModal({ row, errorHash, projectName: projectNameProp,
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(false);
   const [solutionActionError, setSolutionActionError] = useState('');
+  const [duplicatePrompt, setDuplicatePrompt] = useState<DuplicatePromptState | null>(null);
 
   useEffect(() => {
     if (!effectiveErrorHash) return;
@@ -125,7 +140,8 @@ export function ErrorDetailModal({ row, errorHash, projectName: projectNameProp,
     setSolutionText(solution);
     setSolutionSaved(!!solution);
     setEditing(false);
-  }, [data?.solution?.solution]);
+    setResolved(data?.error_status === 'resolved');
+  }, [data?.solution?.solution, data?.error_status]);
 
   const projectName = data?.project_name ?? row?.project ?? projectNameProp ?? '';
   const errorMessage = data?.error_message ?? row?.error ?? '';
@@ -133,24 +149,56 @@ export function ErrorDetailModal({ row, errorHash, projectName: projectNameProp,
   const errorHashValue = data?.error_hash ?? row?.error_hash ?? '';
   const displayFile = data?.file_name ?? row?.file_name ?? '';
   const status = data?.status;
+  const errorStatus = data?.error_status;
   const occurrences = data?.occurrences ?? [];
+  const isTerminalState = errorStatus === 'resolved' || errorStatus === 'reopened';
 
-  async function handleSave() {
+  async function handleSave(forceCreate = false) {
     if (!effectiveErrorHash || !solutionText.trim()) return;
     setSaving(true);
+    setSolutionActionError('');
+    setDuplicatePrompt(null);
     try {
       const payload: Record<string, unknown> = {
         error_hash: effectiveErrorHash,
         solution: solutionText.trim(),
         project_name: projectName,
+        check_only: !forceCreate,
       };
       if (data?.solution?.id && solutionSaved) {
         payload.base_solution_id = data.solution.id;
       }
-      const res = await apiFetch('/api/knowledge_base', {
+      if (forceCreate) {
+        payload.create_anyway = true;
+      }
+
+      const previewRes = await apiFetch('/api/knowledge_base', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
+      });
+      const preview = await previewRes.json();
+      if (preview?.duplicate_prompt && !forceCreate) {
+        setDuplicatePrompt({
+          mode: editing ? 'improve' : 'save',
+          decision: preview.decision,
+          similarity: preview.similarity,
+          solution_id: preview.solution_id,
+          solution: preview.solution,
+          created_by: preview.created_by,
+          version: preview.version,
+          confidence_score: preview.confidence_score,
+          usage_count: preview.usage_count,
+          created_at: preview.created_at,
+        });
+        return;
+      }
+
+      const finalPayload = { ...payload, check_only: false };
+      const res = await apiFetch('/api/knowledge_base', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(finalPayload),
       });
       const saved = await res.json();
       setSolutionSaved(true);
@@ -158,6 +206,24 @@ export function ErrorDetailModal({ row, errorHash, projectName: projectNameProp,
       setData((prev) => prev ? { ...prev, solution: { solution: saved.solution, updated_at: saved.created_at, id: saved.id, version: saved.version, confidence_score: saved.confidence_score, usage_count: saved.usage_count, created_by: saved.created_by, created_at: saved.created_at } } : prev);
     } catch (err) {
       console.error('Failed to save solution:', err);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleUseDuplicateSolution() {
+    if (!effectiveErrorHash || !projectName || !duplicatePrompt?.solution_id) return;
+    setSaving(true);
+    try {
+      await apiFetch('/api/knowledge_base/use', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ solution_id: duplicatePrompt.solution_id, error_hash: effectiveErrorHash, project_name: projectName }),
+      });
+      setDuplicatePrompt(null);
+      navigate('/dashboard');
+    } catch (err) {
+      setSolutionActionError(err instanceof ApiError ? err.label : 'Failed to use existing solution.');
     } finally {
       setSaving(false);
     }
@@ -207,6 +273,25 @@ export function ErrorDetailModal({ row, errorHash, projectName: projectNameProp,
     setSolutionActionError('');
     setEditing(true);
     setSolutionText(data?.solution?.solution ?? solutionText);
+  }
+
+  async function handleReopen() {
+    if (!effectiveErrorHash || !projectName) return;
+    setResolving(true);
+    try {
+      await apiFetch('/api/knowledge_base/reopen', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ error_hash: effectiveErrorHash, project_name: projectName }),
+      });
+      setData((prev) => prev ? { ...prev, error_status: 'reopened' } : prev);
+      setResolved(false);
+      navigate('/dashboard');
+    } catch (err) {
+      setSolutionActionError(err instanceof ApiError ? err.label : 'Failed to reopen issue.');
+    } finally {
+      setResolving(false);
+    }
   }
 
   async function handleUseSolution() {
@@ -487,6 +572,29 @@ export function ErrorDetailModal({ row, errorHash, projectName: projectNameProp,
       </div>
 
       <div style={{ padding: '14px 26px', borderTop: '1px solid var(--card-border)', display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 12 }}>
+        {duplicatePrompt && (
+          <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.68)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100, padding: 24 }}>
+            <div style={{ width: '100%', maxWidth: 480, background: 'var(--surface)', border: '1px solid var(--card-border)', borderRadius: 12, padding: 20, boxShadow: '0 16px 40px rgba(0,0,0,0.35)' }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: '#818cf8', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 8 }}>
+                Duplicate solution detected
+              </div>
+              <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--text)', marginBottom: 10 }}>
+                {duplicatePrompt.mode === 'improve' ? 'Your updated solution is nearly identical to an existing solution.' : 'A very similar solution already exists.'}
+              </div>
+              <div style={{ fontSize: 13, color: 'var(--text-muted)', lineHeight: 1.6, marginBottom: 12 }}>
+                {duplicatePrompt.solution && <div style={{ marginBottom: 6 }}>Existing solution: {duplicatePrompt.solution}</div>}
+                {typeof duplicatePrompt.confidence_score === 'number' && <div>Confidence: {duplicatePrompt.confidence_score.toFixed(2)}</div>}
+                {typeof duplicatePrompt.usage_count === 'number' && <div>Usage: {duplicatePrompt.usage_count}</div>}
+                {typeof duplicatePrompt.version === 'number' && <div>Version: {duplicatePrompt.version}</div>}
+                {duplicatePrompt.created_by && <div>Created by: {duplicatePrompt.created_by}</div>}
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+                <button onClick={handleUseDuplicateSolution} disabled={saving} style={{ ...btnPrimary, padding: '7px 14px' }}>Use Existing</button>
+                <button onClick={() => handleSave(true)} disabled={saving} style={{ ...btnSecondary, padding: '7px 14px' }}>Create Anyway</button>
+              </div>
+            </div>
+          </div>
+        )}
         {resolveError && (
           <span style={{
             fontSize: 12, color: '#fbbf24', fontWeight: 500,
@@ -498,11 +606,25 @@ export function ErrorDetailModal({ row, errorHash, projectName: projectNameProp,
         )}
         {resolved ? (
           <span style={{ fontSize: 13, color: '#34d399', fontWeight: 600 }}>✅ Resolved</span>
+        ) : isTerminalState ? (
+          <button
+            onClick={handleReopen}
+            disabled={resolving}
+            style={{
+              padding: '8px 20px', borderRadius: 7, fontSize: 13, fontWeight: 600,
+              cursor: resolving ? 'not-allowed' : 'pointer',
+              background: 'rgba(248,113,113,0.12)', color: '#f87171', border: '1px solid rgba(248,113,113,0.3)',
+              opacity: resolving ? 0.7 : 1,
+              flexShrink: 0,
+            }}
+          >
+            {resolving ? 'Reopening…' : '↺ Reopen Issue'}
+          </button>
         ) : (
           <>
             {(!solutionSaved || editing) && (
               <button
-                onClick={handleSave}
+                onClick={() => handleSave(false)}
                 disabled={saving || !solutionText.trim()}
                 style={{
                   padding: '8px 20px', borderRadius: 7, fontSize: 13, fontWeight: 600,
