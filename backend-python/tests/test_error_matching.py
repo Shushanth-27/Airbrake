@@ -35,6 +35,11 @@ class ErrorMatchingTests(unittest.TestCase):
         self.assertIn(module.derive_error_hash('ValueError: Boom!', detail), candidates)
         self.assertIn(hashlib.md5('Traceback\n  File "x.py"\nValueError: Boom!'.encode('utf-8')).hexdigest(), candidates)
 
+    def test_builds_hash_candidates_for_existing_hash(self):
+        hash_value = hashlib.md5(b'valueerror').hexdigest()
+        candidates = module.build_error_hash_candidates(hash_value, None)
+        self.assertEqual(candidates, [hash_value])
+
     def test_reuses_existing_solution_for_duplicate_text(self):
         mock_query = mock.patch.object(knowledge_base, 'query', return_value=[{'id': 'sol-1', 'solution': 'Use retry logic', 'usage_count': 2, 'confidence_score': 54.0, 'version': 1}])
         mock_execute = mock.patch.object(knowledge_base, 'execute_returning', return_value={'id': 'sol-1', 'duplicate': True})

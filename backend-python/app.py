@@ -12,6 +12,7 @@ Architecture: Single-table design using DSQL table 'projects_data'
 import os
 import uuid
 import hashlib
+import re
 import json
 import time
 import random
@@ -45,20 +46,25 @@ except Exception as exc:  # pragma: no cover - import safety
     def get_ai_diagnostics():
         return {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
 
+_error_matching_import_err = None
 try:
     from ai.error_matching import build_error_hash_candidates, build_lookup_hash_candidates, derive_error_hash, normalize_project_name
 except Exception as exc:  # pragma: no cover - import safety
-    def build_error_hash_candidates(error_text, error_detail=None):
-        return []
-
-    def build_lookup_hash_candidates(error_hash, error_text=None, error_detail=None):
-        return [str(error_hash)] if error_hash else []
-
+    _error_matching_import_err = exc
+    print(f"[app] WARNING: ai.error_matching import failed: {type(exc).__name__}: {exc}")
+    
     def derive_error_hash(error_text, error_detail=None):
         return hashlib.md5((error_detail or error_text or '').strip().lower().encode('utf-8')).hexdigest()
 
     def normalize_project_name(project_name):
         return (project_name or '').strip().lower().replace('_', ' ')
+    
+    def build_error_hash_candidates(error_text, error_detail=None):
+        """Fallback stub if ai.error_matching import fails."""
+        if isinstance(error_text, str) and re.fullmatch(r"[0-9a-fA-F]{32}", error_text.strip()):
+            return [error_text.strip().lower()]
+        primary = derive_error_hash(error_text, error_detail)
+        return [primary] if primary else []
 
 # ── Knowledge base functions (DB only, no AI runtime required) ────────────────
 # These are always imported directly — they handle AI runtime failures internally.
@@ -1021,8 +1027,13 @@ def get_break_detail(error_hash):
     GET /api/breaks/detail/:error_hash
     Returns full error detail for the Error Details page.
     """
+    request_id = g.get("request_id", "unknown")
     try:
         project_name = (request.args.get('project_name') or '').strip() or None
+        
+        print(f"[req:{request_id}] [Breaks:detail] TRACE START")
+        print(f"[req:{request_id}] [Breaks:detail] URL error_hash={repr(error_hash)}")
+        print(f"[req:{request_id}] [Breaks:detail] query_param project_name={repr(project_name)}")
 
         # Get grouped error info
         conditions = [
@@ -1031,29 +1042,69 @@ def get_break_detail(error_hash):
             "error <> ''",
         ]
         params = []
-        lookup_hashes = build_lookup_hash_candidates(error_hash, None, None)
-        if lookup_hashes:
+        hash_candidates = build_error_hash_candidates(error_hash, None)
+        print(f"[req:{request_id}] [Breaks:detail] hash_candidates={hash_candidates}")
+        
+        if hash_candidates is None:
+            print(f"[req:{request_id}] [Breaks:detail] WARNING: build_error_hash_candidates returned None!")
+            if _error_matching_import_err:
+                print(f"[req:{request_id}] [Breaks:detail] Import error was: {type(_error_matching_import_err).__name__}: {_error_matching_import_err}")
+            hash_candidates = []
+        
+        if error_hash:
             hash_clauses = []
             for candidate in lookup_hashes:
                 hash_clauses.append("error_hash = %s")
                 params.append(candidate)
-            hash_clauses.append("COALESCE(error_hash, MD5(LOWER(TRIM(error)))) = %s")
-            params.append(error_hash)
-            conditions.append(f"({' OR '.join(hash_clauses)})")
+                print(f"[req:{request_id}] [Breaks:detail] Added hash candidate[{idx}]={repr(candidate)}")
+            if hash_clauses:
+                conditions.append(f"({' OR '.join(hash_clauses)})")
+                print(f"[req:{request_id}] [Breaks:detail] Added hash condition with {len(hash_clauses)} candidates")
         if project_name:
-            project_match = normalize_project_name(project_name)
-            conditions.append("LOWER(REPLACE(project_name, '_', ' ')) = LOWER(REPLACE(%s, '_', ' '))")
-            params.append(project_match)
+            conditions.insert(0, "LOWER(project_name) = LOWER(%s)")
+            params.insert(0, project_name)
+            print(f"[req:{request_id}] [Breaks:detail] Inserted project_name at params[0]={repr(project_name)}")
 
-        error_rows = query(
+        where_clause = ' AND '.join(conditions)
+        print(f"[req:{request_id}] [Breaks:detail] WHERE clause: {where_clause}")
+        print(f"[req:{request_id}] [Breaks:detail] Parameters tuple: {tuple(params)}")
+        print(f"[req:{request_id}] [Breaks:detail] Param count: {len(params)}")
+
+        sql = (
             "SELECT project_name, error AS error_message, error_detail, error_hash, "
             "failure_count, timestamp, error_status, reopened_at, file_name "
             f"FROM {TABLE} "
-            f"WHERE {' AND '.join(conditions)} "
-            "ORDER BY timestamp DESC",
-            tuple(params),
+            f"WHERE {where_clause} "
+            "ORDER BY timestamp DESC"
         )
+        print(f"[req:{request_id}] [Breaks:detail] Full SQL:\n{sql}")
+        
+        error_rows = query(sql, tuple(params))
+        
+        print(f"[req:{request_id}] [Breaks:detail] Query returned {len(error_rows) if error_rows else 0} rows")
+        if error_rows:
+            for i, row in enumerate(error_rows[:3]):
+                print(f"[req:{request_id}] [Breaks:detail] Row[{i}]: error_hash={row.get('error_hash')}, project_name={row.get('project_name')}, error={row.get('error_message', '')[:50]}")
+        
         if not error_rows:
+            print(f"[req:{request_id}] [Breaks:detail] ZERO ROWS - Testing conditions individually")
+            # Test each condition to find the culprit
+            test_conditions = [
+                ("row_type='log' only", ["row_type = 'log'"], []),
+                ("no row_type filter", ["error IS NOT NULL", "error <> ''"], []),
+                ("with error_hash candidates", conditions[:4] if len(conditions) > 4 else conditions, params[:1] if params else []),
+            ]
+            for test_name, test_conds, test_params in test_conditions:
+                test_where = ' AND '.join(test_conds)
+                test_sql = f"SELECT COUNT(*) as cnt FROM {TABLE} WHERE {test_where}"
+                print(f"[req:{request_id}] [Breaks:detail] TEST[{test_name}]: {test_sql}")
+                try:
+                    result = query(test_sql, tuple(test_params))
+                    if result:
+                        cnt = result[0].get('cnt', 0)
+                        print(f"[req:{request_id}] [Breaks:detail] TEST[{test_name}] returned {cnt} rows")
+                except Exception as e:
+                    print(f"[req:{request_id}] [Breaks:detail] TEST[{test_name}] ERROR: {e}")
             return jsonify({"error": "Not Found", "message": "Error not found."}), 404
 
         first = error_rows[0]

@@ -32,10 +32,16 @@ def derive_error_hash(error_text: Optional[str], error_detail: Optional[str] = N
     return hashlib.md5(normalized.encode('utf-8')).hexdigest()
 
 
+def _is_error_hash(value: str) -> bool:
+    return bool(re.fullmatch(r'[0-9a-fA-F]{32}', value.strip()))
+
+
 def build_error_hash_candidates(error_text: Optional[str], error_detail: Optional[str] = None) -> list[str]:
     raw = (error_detail or error_text or '').strip()
     if not raw:
         return []
+    if _is_error_hash(raw):
+        return [raw.lower()]
 
     candidates: list[str] = []
     for variant in {
