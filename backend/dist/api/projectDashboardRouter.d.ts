@@ -11,6 +11,7 @@
  * dynamically via information_schema so no hardcoded table list is needed.
  */
 import { Pool } from 'pg';
+export declare function createGetErrorDetailHandler(pool: Pool): (req: any, res: any) => Promise<any>;
 export declare function createProjectDashboardRouter(pool: Pool): any;
 /**
  * Upsert logic for per-project error tracking.

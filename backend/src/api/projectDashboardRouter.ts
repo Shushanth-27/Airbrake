@@ -95,6 +95,83 @@ function buildTotalUnion(tables: string[]): string {
 
 // ─── Router factory ───────────────────────────────────────────────────────────
 
+export function createGetErrorDetailHandler(pool: Pool) {
+  return async (req: any, res: any) => {
+    try {
+      const errorHash = String(req.params?.errorHash ?? '').trim();
+      const projectName = req.query?.project_name ? String(req.query.project_name) : undefined;
+
+      if (!errorHash) {
+        return res.status(400).json({ error: 'errorHash is required' });
+      }
+
+      const tables = await getProjectTables(pool);
+      const filteredTables = projectName
+        ? tables.filter((table) => {
+            const normalizedProject = projectName.toLowerCase();
+            const normalizedTable = table.toLowerCase();
+            return normalizedTable === normalizedProject.replace(/ /g, '_') || normalizedTable.replace(/_/g, ' ') === normalizedProject;
+          })
+        : tables;
+
+      if (filteredTables.length === 0) {
+        return res.status(404).json({ error: 'Not Found', message: 'Error detail not found.' });
+      }
+
+      for (const table of filteredTables) {
+        const { rows } = await pool.query(`
+          SELECT
+            REPLACE(project_name, '_', ' ') AS project_name,
+            file_name,
+            error AS error_message,
+            error_detail,
+            COALESCE(error_hash, MD5(COALESCE(error_detail, error))) AS error_hash,
+            COALESCE(failure_count, 1)::int AS occurrence_count,
+            timestamp AS first_seen,
+            timestamp AS last_seen,
+            CASE
+              WHEN error_status = 'reopened' THEN 'regression'
+              WHEN COALESCE(failure_count, 1) <= 1 THEN 'new'
+              ELSE 'existing'
+            END AS status,
+            error_status
+          FROM "${table}"
+          WHERE error_hash = $1
+             OR COALESCE(error_hash, MD5(COALESCE(error_detail, error))) = $1
+          ORDER BY timestamp DESC
+          LIMIT 1
+        `, [errorHash]);
+
+        if (rows[0]) {
+          const row = rows[0];
+          const occurrenceCount = row.occurrence_count ?? row.failure_count ?? 1;
+          const derivedStatus = row.status ?? (row.error_status === 'reopened' ? 'regression' : (occurrenceCount > 1 ? 'existing' : 'new'));
+          return res.json({
+            project_name: row.project_name,
+            file_name: row.file_name,
+            error_message: row.error_message,
+            error_detail: row.error_detail,
+            error_hash: row.error_hash,
+            occurrence_count: occurrenceCount,
+            first_seen: row.first_seen,
+            last_seen: row.last_seen,
+            status: derivedStatus,
+            error_status: row.error_status,
+            occurrences: [{ file_name: row.file_name, timestamp: row.first_seen, failure_count: occurrenceCount }],
+            solution: null,
+            ai_recommendation: null,
+          });
+        }
+      }
+
+      return res.status(404).json({ error: 'Not Found', message: 'Error detail not found.' });
+    } catch (err) {
+      console.error('[Breaks] error detail lookup failed:', err);
+      return res.status(500).json({ error: 'Internal server error' });
+    }
+  };
+}
+
 export function createProjectDashboardRouter(pool: Pool) {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const express = require('express');
@@ -173,6 +250,8 @@ export function createProjectDashboardRouter(pool: Pool) {
       res.status(500).json({ error: 'Internal server error', detail: (err as any).message });
     }
   });
+
+  router.get('/detail/:errorHash', createGetErrorDetailHandler(pool));
 
   // GET /errors?from=ISO&to=ISO — errors in date range (or all if no params)
   router.get('/errors', async (req: any, res: any) => {

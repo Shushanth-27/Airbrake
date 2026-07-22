@@ -46,8 +46,14 @@ except Exception as exc:  # pragma: no cover - import safety
         return {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
 
 try:
-    from ai.error_matching import build_error_hash_candidates, derive_error_hash, normalize_project_name
+    from ai.error_matching import build_error_hash_candidates, build_lookup_hash_candidates, derive_error_hash, normalize_project_name
 except Exception as exc:  # pragma: no cover - import safety
+    def build_error_hash_candidates(error_text, error_detail=None):
+        return []
+
+    def build_lookup_hash_candidates(error_hash, error_text=None, error_detail=None):
+        return [str(error_hash)] if error_hash else []
+
     def derive_error_hash(error_text, error_detail=None):
         return hashlib.md5((error_detail or error_text or '').strip().lower().encode('utf-8')).hexdigest()
 
@@ -1025,17 +1031,19 @@ def get_break_detail(error_hash):
             "error <> ''",
         ]
         params = []
-        hash_candidates = build_error_hash_candidates(error_hash, None)
-        if error_hash:
+        lookup_hashes = build_lookup_hash_candidates(error_hash, None, None)
+        if lookup_hashes:
             hash_clauses = []
-            for idx, candidate in enumerate(hash_candidates):
-                hash_clauses.append(f"error_hash = %s")
+            for candidate in lookup_hashes:
+                hash_clauses.append("error_hash = %s")
                 params.append(candidate)
-            if hash_clauses:
-                conditions.append(f"({' OR '.join(hash_clauses)})")
+            hash_clauses.append("COALESCE(error_hash, MD5(LOWER(TRIM(error)))) = %s")
+            params.append(error_hash)
+            conditions.append(f"({' OR '.join(hash_clauses)})")
         if project_name:
-            conditions.insert(0, "LOWER(project_name) = LOWER(%s)")
-            params.insert(0, project_name)
+            project_match = normalize_project_name(project_name)
+            conditions.append("LOWER(REPLACE(project_name, '_', ' ')) = LOWER(REPLACE(%s, '_', ' '))")
+            params.append(project_match)
 
         error_rows = query(
             "SELECT project_name, error AS error_message, error_detail, error_hash, "

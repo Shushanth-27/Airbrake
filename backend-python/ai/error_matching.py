@@ -52,3 +52,21 @@ def build_error_hash_candidates(error_text: Optional[str], error_detail: Optiona
     if derived:
         candidates.append(derived)
     return list(dict.fromkeys(candidates))
+
+
+def build_lookup_hash_candidates(error_hash: Optional[str], error_text: Optional[str] = None, error_detail: Optional[str] = None) -> list[str]:
+    """Build lookup candidates for break-detail and solution lookups.
+
+    This preserves direct hash values (e.g. an already-derived error hash) and also
+    adds derived hash candidates from the error text/detail when available.
+    """
+    candidates: list[str] = []
+    if error_hash:
+        normalized_hash = str(error_hash).strip()
+        if normalized_hash:
+            candidates.append(normalized_hash)
+
+    if error_text or error_detail:
+        candidates.extend(build_error_hash_candidates(error_text, error_detail))
+
+    return list(dict.fromkeys(candidates))
