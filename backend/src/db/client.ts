@@ -16,7 +16,7 @@ import { Pool } from 'pg';
 import { AuroraDSQLPool } from '@aws/aurora-dsql-node-postgres-connector';
 
 const DSQL_ENDPOINT = process.env.DSQL_ENDPOINT ?? '';
-const DSQL_REGION   = process.env.DSQL_REGION   ?? 'us-east-1';
+const DSQL_REGION = process.env.DSQL_REGION ?? 'us-east-1';
 
 if (!DSQL_ENDPOINT) {
   console.error('[DB] DSQL_ENDPOINT environment variable is not set. Set it in Lambda → Configuration → Environment variables.');
@@ -30,13 +30,13 @@ console.log(`[DB] Connecting to Aurora DSQL: ${DSQL_ENDPOINT}`);
  * No password, no DATABASE_URL, no manual token rotation needed.
  */
 export const pool: Pool = new AuroraDSQLPool({
-  host:                    DSQL_ENDPOINT,
-  user:                    'admin',        // 'admin' triggers admin-level IAM token
-  database:                'postgres',     // Aurora DSQL has one built-in DB: postgres
-  port:                    5432,
-  region:                  DSQL_REGION,
-  max:                     5,              // small pool — Lambda concurrency is limited
-  idleTimeoutMillis:       10_000,         // release idle connections quickly between invocations
+  host: DSQL_ENDPOINT,
+  user: 'admin',        // 'admin' triggers admin-level IAM token
+  database: 'postgres',     // Aurora DSQL has one built-in DB: postgres
+  port: 5432,
+  region: DSQL_REGION,
+  max: 5,              // small pool — Lambda concurrency is limited
+  idleTimeoutMillis: 10_000,         // release idle connections quickly between invocations
   connectionTimeoutMillis: 5_000,          // fail fast on cold starts rather than hanging
 }) as unknown as Pool;
 
