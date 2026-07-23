@@ -12,12 +12,15 @@ Architecture: Single-table design using DSQL table 'projects_data'
 import os
 import uuid
 import hashlib
+import logging
 import re
 import json
 import time
 import random
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify, make_response, g
+
+logger = logging.getLogger(__name__)
 
 try:
     from db import query, execute, execute_returning
@@ -105,7 +108,8 @@ AI_RECOMMENDATIONS_AVAILABLE = False
 try:
     from ai.recommendations import get_ai_recommendations
     AI_RECOMMENDATIONS_AVAILABLE = True
-except Exception as _ai_import_err:
+except Exception as exc:
+    _ai_import_err = exc
     print(f"[app] WARNING: AI recommendations import failed — recommendations disabled: {_ai_import_err}")
     def get_ai_recommendations(*a, **kw):
         return {"recommendation": None, "solutions": [], "error": str(_ai_import_err)}
@@ -1018,8 +1022,13 @@ def get_break(break_id):
         row = serialize_row(rows[0])
         row["correlatedLogs"] = []
         return jsonify(row)
-    except Exception:
-        return jsonify({"error": "Not Found", "message": "Break not found."}), 404
+    except Exception as exc:
+        import traceback as _tb
+        tb_str = _tb.format_exc()
+        request_id = g.get("request_id", "unknown")
+        print(f"[req:{request_id}] [Breaks] get_break error: {type(exc).__name__}: {exc}")
+        print(f"[req:{request_id}] [Breaks] get_break Traceback:\n{tb_str}")
+        return jsonify({"error": "Internal Server Error", "message": "Failed to load break.", "trace_id": request_id}), 500
 
 
 @app.route("/api/breaks/detail/<error_hash>")
@@ -1187,50 +1196,219 @@ def get_break_detail(error_hash):
             for r in error_rows
         ]
 
-        # Get latest solution from projects_data (row_type='solution') — isolated so failure
-        # does not prevent the rest of Error Details from loading
+        # ── Solution card — semantic-first, three-tier lookup ─────────────────
+        # Retrieval is project-scoped at every tier. The frontend receives the
+        # same solution_data dict shape regardless of which tier matched.
+        #
+        # TIER 1: Pinecone nearest-neighbour for the current error text
+        #         (cross-hash, project-scoped). Best match hydrated from Aurora.
+        # TIER 2: Aurora in-process cosine scan across the whole project.
+        #         Used when Pinecone is unavailable or returns nothing.
+        # TIER 3: Original hash-exact SQL.
+        #         Used when embeddings are unavailable or tiers 1+2 empty.
+        #
+        # Isolated in a try/except so any failure falls back gracefully and
+        # never prevents the rest of Error Details from loading.
         solution_data = None
         solution_error = None
         try:
-            solution_conditions = [
-                "row_type = 'solution'",
-                "(error_hash = %s OR error_hash IN ("
-                f"  SELECT error_hash FROM {TABLE} WHERE row_type = 'log' "
-                f"  AND MD5(LOWER(TRIM(error))) = %s))",
-            ]
-            solution_params = [error_hash, error_hash]
-            if project_name:
-                solution_conditions.append("LOWER(project_name) = LOWER(%s)")
-                solution_params.append(project_name)
-
-            if error_hash:
-                candidate_clauses = []
-                for candidate in build_error_hash_candidates(error_hash, None):
-                    candidate_clauses.append("error_hash = %s")
-                    solution_params.append(candidate)
-                if candidate_clauses:
-                    solution_conditions[1] = f"({' OR '.join(candidate_clauses)})"
-
-            solution_rows = query(
-                f"SELECT id, solution, created_at, created_by, version, confidence_score, usage_count "
-                f"FROM {TABLE} WHERE {' AND '.join(solution_conditions)} "
-                f"ORDER BY created_at DESC LIMIT 1",
-                tuple(solution_params),
-            )
-            if solution_rows:
-                s = solution_rows[0]
-                solution_data = {
-                    "id": s.get("id"),
-                    "solution": s["solution"],
-                    "created_at": s["created_at"].isoformat() if s.get("created_at") else None,
-                    "created_by": s.get("created_by"),
-                    "version": s.get("version"),
+            def _make_solution_data(s):
+                """Convert a DB row dict into the solution_data shape."""
+                sol_text = s.get("solution")
+                if sol_text is None:
+                    return None
+                return {
+                    "id":               s.get("id"),
+                    "solution":         sol_text,
+                    "created_at":       s.get("created_at").isoformat() if s.get("created_at") else None,
+                    "created_by":       s.get("created_by"),
+                    "version":          s.get("version"),
                     "confidence_score": float(s["confidence_score"]) if s.get("confidence_score") is not None else None,
-                    "usage_count": s.get("usage_count"),
+                    "usage_count":      s.get("usage_count"),
                 }
+
+            _solution_found = False
+
+            # ── TIER 1: Pinecone ──────────────────────────────────────────────
+            if not _solution_found:
+                try:
+                    from ai.embeddings import create_embedding, cosine_similarity
+                    from ai.pinecone_service import query_similar as _pinecone_query
+
+                    # Build query text from the error we already have in memory
+                    _err_text    = first.get("error_message") or ""
+                    _detail_text = first.get("error_detail") or ""
+                    _query_text  = f"{_err_text}\n\n{_detail_text}".strip() or _err_text
+
+                    if _query_text:
+                        _qvec = create_embedding(_query_text)
+                        # Project-scoped, no hash filter — cross-hash semantic match
+                        _matches = _pinecone_query(
+                            solution_id=None,
+                            embedding=_qvec,
+                            project_name=project_name,
+                            limit=5,
+                            error_hash=None,
+                        )
+                        if _matches:
+                            _ids = [m.get("id") for m in _matches if m.get("id")]
+                            if _ids:
+                                _placeholders = ", ".join(["%s"] * len(_ids))
+                                _hydrate_conds = [
+                                    "row_type = 'solution'",
+                                    f"id IN ({_placeholders})",
+                                ]
+                                _hydrate_params = list(_ids)
+                                if project_name:
+                                    _hydrate_conds.append("LOWER(project_name) = LOWER(%s)")
+                                    _hydrate_params.append(project_name)
+                                _hydrate_rows = query(
+                                    f"SELECT id, solution, created_at, created_by, version, "
+                                    f"confidence_score, usage_count, embedding "
+                                    f"FROM {TABLE} WHERE {' AND '.join(_hydrate_conds)}",
+                                    tuple(_hydrate_params),
+                                )
+                                if _hydrate_rows:
+                                    # Pick highest cosine match from hydrated rows
+                                    _best_row  = None
+                                    _best_sim  = -1.0
+                                    for _hr in _hydrate_rows:
+                                        _emb_raw = _hr.get("embedding")
+                                        _emb = None
+                                        if isinstance(_emb_raw, str):
+                                            try:
+                                                import json as _j
+                                                _parsed = _j.loads(_emb_raw)
+                                                _emb = _parsed if isinstance(_parsed, list) else None
+                                            except Exception:
+                                                pass
+                                        elif isinstance(_emb_raw, list):
+                                            _emb = _emb_raw
+                                        if _emb:
+                                            _sim = cosine_similarity(_qvec, _emb)
+                                            if _sim > _best_sim:
+                                                _best_sim = _sim
+                                                _best_row = _hr
+                                        elif _best_row is None:
+                                            _best_row = _hr
+                                    if _best_row:
+                                        solution_data = _make_solution_data(_best_row)
+                                        if solution_data:
+                                            _solution_found = True
+                                            debug_info["solution_tier"] = f"tier1_pinecone sim={_best_sim:.3f}"
+                                            logger.info(
+                                                "[req:%s] [Breaks:detail] Solution TIER 1 (Pinecone) sim=%.3f",
+                                                request_id, _best_sim,
+                                            )
+                except Exception as _t1_exc:
+                    logger.exception(
+                        "[req:%s] [Breaks:detail] TIER 1 failed: %s",
+                        request_id, _t1_exc,
+                    )
+                    debug_info["solution_tier1_error"] = str(_t1_exc)
+
+            # ── TIER 2: Aurora in-process cosine scan ─────────────────────────
+            if not _solution_found:
+                try:
+                    from ai.embeddings import create_embedding as _ce2, cosine_similarity as _cs2
+                    _err_text2   = first.get("error_message") or ""
+                    _detail2     = first.get("error_detail") or ""
+                    _qtext2      = f"{_err_text2}\n\n{_detail2}".strip() or _err_text2
+
+                    if _qtext2:
+                        _qvec2 = _ce2(_qtext2)
+                        _scan_conds  = ["row_type = 'solution'", "embedding IS NOT NULL"]
+                        _scan_params = []
+                        if project_name:
+                            _scan_conds.append("LOWER(project_name) = LOWER(%s)")
+                            _scan_params.append(project_name)
+                        _scan_rows = query(
+                            f"SELECT id, solution, created_at, created_by, version, "
+                            f"confidence_score, usage_count, embedding "
+                            f"FROM {TABLE} WHERE {' AND '.join(_scan_conds)} "
+                            f"ORDER BY confidence_score DESC, usage_count DESC, created_at DESC "
+                            f"LIMIT 200",
+                            tuple(_scan_params),
+                        )
+                        _t2_best_row = None
+                        _t2_best_sim = -1.0
+                        for _sr in _scan_rows:
+                            _emb_raw2 = _sr.get("embedding")
+                            _emb2 = None
+                            if isinstance(_emb_raw2, str):
+                                try:
+                                    import json as _j2
+                                    _p2 = _j2.loads(_emb_raw2)
+                                    _emb2 = _p2 if isinstance(_p2, list) else None
+                                except Exception:
+                                    pass
+                            elif isinstance(_emb_raw2, list):
+                                _emb2 = _emb_raw2
+                            if _emb2 and len(_emb2) > 0:
+                                _sim2 = _cs2(_qvec2, _emb2)
+                                if _sim2 > _t2_best_sim:
+                                    _t2_best_sim = _sim2
+                                    _t2_best_row = _sr
+                        if _t2_best_row and _t2_best_sim >= 0.30:
+                            solution_data = _make_solution_data(_t2_best_row)
+                            if solution_data:
+                                _solution_found = True
+                                debug_info["solution_tier"] = f"tier2_aurora_scan sim={_t2_best_sim:.3f}"
+                                logger.info(
+                                    "[req:%s] [Breaks:detail] Solution TIER 2 (Aurora scan) sim=%.3f",
+                                    request_id, _t2_best_sim,
+                                )
+                except Exception as _t2_exc:
+                    logger.exception(
+                        "[req:%s] [Breaks:detail] TIER 2 failed: %s",
+                        request_id, _t2_exc,
+                    )
+                    debug_info["solution_tier2_error"] = str(_t2_exc)
+
+            # ── TIER 3: original hash-exact SQL (backward-compatible) ─────────
+            if not _solution_found:
+                logger.info(
+                    "[req:%s] [Breaks:detail] Solution TIER 3 (hash fallback)",
+                    request_id,
+                )
+                debug_info["solution_tier"] = "tier3_hash_fallback"
+                solution_conditions = ["row_type = 'solution'"]
+                solution_params = []
+                if error_hash:
+                    candidate_clauses = []
+                    for candidate in build_error_hash_candidates(error_hash, None):
+                        candidate_clauses.append("error_hash = %s")
+                        solution_params.append(candidate)
+                    if candidate_clauses:
+                        fallback_clause = (
+                            f"error_hash IN (SELECT error_hash FROM {TABLE} WHERE row_type = 'log' "
+                            f"AND MD5(LOWER(TRIM(error))) = %s)"
+                        )
+                        solution_conditions.append(
+                            f"({' OR '.join(candidate_clauses)} OR {fallback_clause})"
+                        )
+                        solution_params.append(error_hash)
+                    else:
+                        solution_conditions.append("error_hash = %s")
+                        solution_params.append(error_hash)
+                if project_name:
+                    solution_conditions.append("LOWER(project_name) = LOWER(%s)")
+                    solution_params.append(project_name)
+
+                solution_rows = query(
+                    f"SELECT id, solution, created_at, created_by, version, confidence_score, usage_count "
+                    f"FROM {TABLE} WHERE {' AND '.join(solution_conditions)} "
+                    f"ORDER BY created_at DESC LIMIT 1",
+                    tuple(solution_params),
+                )
+                if solution_rows:
+                    solution_data = _make_solution_data(solution_rows[0])
+
         except Exception as e:
-            print(f"[Breaks] solution query error: {e}")
+            logger.exception("[Breaks:detail] Solution card lookup failed: %s", e)
             debug_info["solution_stage"] = "solution_query_failed"
+            debug_info["solution_error"] = {"type": type(e).__name__, "message": str(e)}
+            solution_error = f"Failed to load solution: {str(e)}"
             debug_info["solution_error"] = {"type": type(e).__name__, "message": str(e)}
             solution_error = f"Failed to load solution: {str(e)}"
 
@@ -1279,17 +1457,20 @@ def get_break_detail(error_hash):
         import traceback as _tb
         tb_str = _tb.format_exc()
         request_id = g.get("request_id", "unknown")
+        debug_info["stage"] = "unhandled_exception"
+        debug_info["exception"] = {"type": type(e).__name__, "message": str(e)}
+        debug_info["traceback"] = tb_str
         print(f"[req:{request_id}] [Breaks:detail] ERROR: {type(e).__name__}: {e}")
         print(f"[req:{request_id}] [Breaks:detail] error_hash={error_hash} project_name={project_name}")
         print(f"[req:{request_id}] [Breaks:detail] Traceback:\n{tb_str}")
         response_body = {
-            "error": "Not Found",
-            "message": "Error not found or failed to load.",
+            "error": "Internal Server Error",
+            "message": "Error detail failed to load.",
             "trace_id": request_id,
         }
         if DEBUG_BREAK_DETAIL:
             response_body["debug"] = debug_info
-        return jsonify(response_body), 404
+        return jsonify(response_body), 500
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1347,8 +1528,8 @@ def dashboard_legacy():
 
 @app.route("/api/knowledge_base/reopen", methods=["POST"])
 def reopen_error_solution():
-    body = request.get_json() or {}
-    error_hash = body.get("error_hash")
+    body         = request.get_json() or {}
+    error_hash   = body.get("error_hash")
     project_name = body.get("project_name")
     if not error_hash or not project_name:
         return jsonify({"error": "error_hash and project_name are required"}), 400
@@ -1359,17 +1540,18 @@ def reopen_error_solution():
             f"AND error_status IN ('resolved', 'reopened')",
             (error_hash, project_name),
         )
+        logger.info("[Reopen] error_hash=%r project=%r rows_updated=%d",
+                    error_hash, project_name, count)
         return jsonify({"reopened": count, "project_name": project_name, "error_hash": error_hash})
     except Exception as e:
-        import traceback
-        traceback.print_exc()
+        logger.exception("[Reopen] Failed: %s", e)
         return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/knowledge_base/resolve", methods=["POST"])
 def resolve_error_solution():
-    body = request.get_json() or {}
-    error_hash = body.get("error_hash")
+    body         = request.get_json() or {}
+    error_hash   = body.get("error_hash")
     project_name = body.get("project_name")
     if not error_hash or not project_name:
         return jsonify({"error": "error_hash and project_name are required"}), 400
@@ -1380,32 +1562,51 @@ def resolve_error_solution():
             f"AND error_status IN ('open', 'reopened')",
             (error_hash, project_name),
         )
+        logger.info("[Resolve] error_hash=%r project=%r rows_updated=%d",
+                    error_hash, project_name, count)
         return jsonify({"resolved": count, "project_name": project_name, "error_hash": error_hash})
     except Exception as e:
-        import traceback
-        traceback.print_exc()
+        logger.exception("[Resolve] Failed: %s", e)
         return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/knowledge_base/use", methods=["POST"])
 def use_solution():
-    body = request.get_json() or {}
-    solution_id = body.get("solution_id")
-    error_hash = body.get("error_hash")
+    body         = request.get_json() or {}
+    solution_id  = body.get("solution_id")
+    error_hash   = body.get("error_hash")
     project_name = body.get("project_name")
     if not solution_id or not error_hash or not project_name:
         return jsonify({"error": "solution_id, error_hash and project_name are required"}), 400
     try:
-        increment_usage(solution_id)
+        # Atomically increment usage and get the updated solution row
+        updated_solution = increment_usage(solution_id)
+
+        # Mark the error as resolved
         execute(
             f"UPDATE {TABLE} SET error_status = 'resolved', resolved_at = NOW() "
-            f"WHERE row_type = 'log' AND error_hash = %s AND LOWER(project_name) = LOWER(%s) "
-            "AND error_status IN ('open', 'reopened')",
+            f"WHERE row_type = 'log' AND error_hash = %s "
+            f"AND LOWER(project_name) = LOWER(%s) "
+            f"AND error_status IN ('open', 'reopened')",
             (error_hash, project_name),
         )
-        return jsonify({"used": True, "solution_id": solution_id})
+        logger.info("[Solution] Usage incremented and error resolved — solution_id=%s error_hash=%r",
+                    solution_id, error_hash)
+
+        # Return updated solution metrics so the frontend can refresh in-place
+        sol = serialize_row(updated_solution) if updated_solution else {}
+        return jsonify({
+            "used":             True,
+            "solution_id":      solution_id,
+            "solution":         sol.get("solution"),
+            "version":          sol.get("version"),
+            "confidence_score": sol.get("confidence_score"),
+            "usage_count":      sol.get("usage_count"),
+            "created_by":       sol.get("created_by"),
+            "created_at":       sol.get("created_at"),
+        })
     except Exception as e:
-        import traceback; traceback.print_exc()
+        logger.exception("[use_solution] Failed: %s", e)
         return jsonify({"error": str(e), "exception": type(e).__name__}), 500
 
 
