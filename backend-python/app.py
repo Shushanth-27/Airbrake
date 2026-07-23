@@ -66,6 +66,17 @@ except Exception as exc:  # pragma: no cover - import safety
         primary = derive_error_hash(error_text, error_detail)
         return [primary] if primary else []
 
+# ── Stack trace parsing ────────────────────────────────────────────────────────
+try:
+    from stacktrace_parser import parse_and_enhance_stacktrace
+    STACKTRACE_PARSER_AVAILABLE = True
+except Exception as exc:
+    print(f"[app] WARNING: stacktrace_parser import failed: {type(exc).__name__}: {exc}")
+    STACKTRACE_PARSER_AVAILABLE = False
+    def parse_and_enhance_stacktrace(error_text, error_detail=None, enhance_with_source=True):
+        """Fallback stub — returns empty parsed structure."""
+        return {"frames": [], "raw_trace": error_detail or error_text or ""}
+
 # ── Knowledge base functions (DB only, no AI runtime required) ────────────────
 # These are always imported directly — they handle AI runtime failures internally.
 KB_AVAILABLE = False
@@ -1244,11 +1255,27 @@ def get_break_detail(error_hash):
             debug_info["ai_stage"] = "ai_exception"
             debug_info["ai_error"] = {"type": type(e).__name__, "message": str(e)}
 
+        # Parse stack trace to extract structured frame information with source code lines
+        parsed_stacktrace = None
+        if STACKTRACE_PARSER_AVAILABLE:
+            try:
+                parsed_stacktrace = parse_and_enhance_stacktrace(
+                    first["error_message"],
+                    first.get("error_detail"),
+                    enhance_with_source=True,
+                )
+                debug_info["stacktrace_parsed"] = True
+                debug_info["frame_count"] = len(parsed_stacktrace.get("frames", []))
+            except Exception as e:
+                print(f"[req:{request_id}] [Breaks:detail] Stack trace parsing failed: {e}")
+                debug_info["stacktrace_parse_error"] = str(e)
+
         result = {
             "project_name": first["project_name"],
             "file_name": file_name,
             "error_message": first["error_message"],
             "error_detail": first.get("error_detail"),
+            "parsed_stacktrace": parsed_stacktrace,
             "error_hash": error_hash,
             "occurrence_count": occurrence_count,
             "first_seen": first_seen,

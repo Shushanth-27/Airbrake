@@ -39,6 +39,19 @@ interface AiRecommendation {
   solutions: SimilarSolution[];
 }
 
+interface StackFrame {
+  file_path: string;
+  line_number: number;
+  function_name?: string | null;
+  code_line?: string | null;
+  column?: number | null;
+}
+
+interface ParsedStackTrace {
+  frames: StackFrame[];
+  raw_trace: string;
+}
+
 interface DuplicatePromptState {
   mode: 'save' | 'improve';
   decision?: string | null;
@@ -57,6 +70,7 @@ interface ErrorDetailData {
   file_name?: string | null;
   error_message: string;
   error_detail: string | null;
+  parsed_stacktrace?: ParsedStackTrace | null;
   error_hash: string;
   occurrence_count: number;
   first_seen: string | null;
@@ -76,11 +90,128 @@ function fmt(ts: string | null) {
   });
 }
 
+function ParsedStackTraceView({ parsedTrace }: { parsedTrace: ParsedStackTrace }) {
+  if (!parsedTrace.frames || parsedTrace.frames.length === 0) {
+    // Fall back to raw trace if no frames parsed
+    return (
+      <pre style={{
+        margin: 0, fontFamily: 'ui-monospace, monospace', fontSize: 12,
+        lineHeight: 1.8, color: '#fca5a5',
+        background: 'rgba(239,68,68,0.06)', border: '1px solid rgba(239,68,68,0.15)',
+        borderRadius: 8, padding: '18px 20px',
+        whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+        minHeight: 140,
+      }}>
+        {parsedTrace.raw_trace}
+      </pre>
+    );
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      {parsedTrace.frames.map((frame, idx) => (
+        <div
+          key={idx}
+          style={{
+            background: 'rgba(239,68,68,0.04)',
+            border: '1px solid rgba(239,68,68,0.12)',
+            borderRadius: 8,
+            overflow: 'hidden',
+          }}
+        >
+          {/* Frame header with file path and function */}
+          <div
+            style={{
+              padding: '10px 14px',
+              background: 'rgba(239,68,68,0.06)',
+              borderBottom: '1px solid rgba(239,68,68,0.12)',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              fontSize: 12,
+            }}
+          >
+            <span style={{ color: '#fca5a5', fontWeight: 600 }}>
+              {frame.file_path}
+            </span>
+            <span style={{ color: 'rgba(252,165,165,0.5)' }}>:</span>
+            <span style={{ color: '#fbbf24', fontWeight: 600 }}>
+              line {frame.line_number}
+            </span>
+            {frame.column !== null && frame.column !== undefined && (
+              <>
+                <span style={{ color: 'rgba(252,165,165,0.5)' }}>:</span>
+                <span style={{ color: '#fbbf24' }}>col {frame.column}</span>
+              </>
+            )}
+            {frame.function_name && (
+              <>
+                <span style={{ color: 'rgba(252,165,165,0.5)', marginLeft: 4 }}>in</span>
+                <span style={{ color: '#818cf8', fontWeight: 600 }}>
+                  {frame.function_name}
+                </span>
+              </>
+            )}
+          </div>
+
+          {/* Code line display */}
+          {frame.code_line && (
+            <div style={{ padding: '12px 14px' }}>
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'flex-start',
+                  gap: 12,
+                }}
+              >
+                <span
+                  style={{
+                    color: 'rgba(252,165,165,0.4)',
+                    fontSize: 11,
+                    fontFamily: 'ui-monospace, monospace',
+                    minWidth: 32,
+                    textAlign: 'right',
+                    paddingTop: 2,
+                    userSelect: 'none',
+                  }}
+                >
+                  {frame.line_number}
+                </span>
+                <pre
+                  style={{
+                    margin: 0,
+                    fontFamily: 'ui-monospace, monospace',
+                    fontSize: 12,
+                    lineHeight: 1.6,
+                    color: '#fca5a5',
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-word',
+                    flex: 1,
+                  }}
+                >
+                  {frame.code_line}
+                </pre>
+              </div>
+            </div>
+          )}
+
+          {/* If no code line, show a placeholder */}
+          {!frame.code_line && (
+            <div style={{ padding: '12px 14px', fontSize: 11, color: 'rgba(252,165,165,0.4)', fontStyle: 'italic' }}>
+              Source code not available
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function StatusBadge({ status }: { status: string }) {
   const styles: Record<string, { bg: string; color: string; label: string }> = {
-    new:        { bg: 'rgba(99,102,241,0.15)',  color: '#818cf8', label: '● New' },
-    existing:   { bg: 'rgba(245,158,11,0.15)',  color: '#fbbf24', label: '◎ Existing' },
-    regression: { bg: 'rgba(239,68,68,0.15)',   color: '#f87171', label: '⚠ Regression' },
+    new: { bg: 'rgba(99,102,241,0.15)', color: '#818cf8', label: '● New' },
+    existing: { bg: 'rgba(245,158,11,0.15)', color: '#fbbf24', label: '◎ Existing' },
+    regression: { bg: 'rgba(239,68,68,0.15)', color: '#f87171', label: '⚠ Regression' },
   };
   const s = styles[status] ?? styles.new;
   return (
@@ -421,16 +552,20 @@ export function ErrorDetailModal({ row, errorHash, projectName: projectNameProp,
             <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 10 }}>
               Stack Trace
             </div>
-            <pre style={{
-              margin: 0, fontFamily: 'ui-monospace, monospace', fontSize: 12,
-              lineHeight: 1.8, color: '#fca5a5',
-              background: 'rgba(239,68,68,0.06)', border: '1px solid rgba(239,68,68,0.15)',
-              borderRadius: 8, padding: '18px 20px',
-              whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-              minHeight: 140,
-            }}>
-              {errorDetail}
-            </pre>
+            {data?.parsed_stacktrace && data.parsed_stacktrace.frames && data.parsed_stacktrace.frames.length > 0 ? (
+              <ParsedStackTraceView parsedTrace={data.parsed_stacktrace} />
+            ) : (
+              <pre style={{
+                margin: 0, fontFamily: 'ui-monospace, monospace', fontSize: 12,
+                lineHeight: 1.8, color: '#fca5a5',
+                background: 'rgba(239,68,68,0.06)', border: '1px solid rgba(239,68,68,0.15)',
+                borderRadius: 8, padding: '18px 20px',
+                whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+                minHeight: 140,
+              }}>
+                {errorDetail}
+              </pre>
+            )}
           </div>
         )}
 
