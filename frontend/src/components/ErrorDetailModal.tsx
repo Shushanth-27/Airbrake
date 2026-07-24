@@ -1,5 +1,4 @@
 import { useEffect, useState, type CSSProperties } from 'react';
-import { useNavigate } from 'react-router-dom';
 import { apiFetch, ApiError } from '../lib/api';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -41,20 +40,9 @@ interface KbSolution {
   log_ref_id?: string | null;
 }
 
-interface SimilarSolution {
-  id: string | null;
-  solution: string | null;
-  created_by: string | null;
-  created_at: string | null;
-  confidence_score: number | null;
-  usage_count: number | null;
-  version: number | null;
-}
-
 interface AiRecommendation {
   recommendation: string | null;
   solutions: KbSolution[];
-  similar_solutions?: SimilarSolution[];
 }
 
 interface StackFrame {
@@ -112,11 +100,10 @@ function fmt(ts: string | null | undefined) {
 }
 
 export function getTraceDisplayText(
-  _errorDetail: string | null | undefined,
-  solutionText: string | null | undefined,
+  errorDetail: string | null | undefined,
+  _solutionText: string | null | undefined,
 ) {
-  // Stack trace section shows only the saved solution text as context.
-  return solutionText?.trim() || null;
+  return errorDetail?.trim() || null;
 }
 
 // ── Shared styles ─────────────────────────────────────────────────────────────
@@ -162,147 +149,6 @@ function ConfidenceBar({ score }: { score: number }) {
   );
 }
 
-// ── Parsed Stack Trace ────────────────────────────────────────────────────────
-
-function ParsedStackTraceView({ parsedTrace }: { parsedTrace: ParsedStackTrace }) {
-  if (!parsedTrace.frames || parsedTrace.frames.length === 0) {
-    // Fall back to raw trace if no frames parsed
-    return (
-      <pre style={{
-        margin: 0, fontFamily: 'ui-monospace, monospace', fontSize: 12,
-        lineHeight: 1.8, color: '#fca5a5',
-        background: 'rgba(239,68,68,0.06)', border: '1px solid rgba(239,68,68,0.15)',
-        borderRadius: 8, padding: '18px 20px',
-        whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-        minHeight: 140,
-      }}>
-        {parsedTrace.raw_trace}
-      </pre>
-    );
-  }
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-      {parsedTrace.frames.map((frame, idx) => (
-        <div
-          key={idx}
-          style={{
-            background: 'rgba(239,68,68,0.04)',
-            border: '1px solid rgba(239,68,68,0.12)',
-            borderRadius: 8,
-            overflow: 'hidden',
-          }}
-        >
-          {/* Frame header with file path and function */}
-          <div
-            style={{
-              padding: '10px 14px',
-              background: 'rgba(239,68,68,0.06)',
-              borderBottom: '1px solid rgba(239,68,68,0.12)',
-              display: 'flex',
-              alignItems: 'center',
-              gap: 8,
-              fontSize: 12,
-            }}
-          >
-            <span style={{ color: '#fca5a5', fontWeight: 600 }}>
-              {frame.file_path}
-            </span>
-            <span style={{ color: 'rgba(252,165,165,0.5)' }}>:</span>
-            <span style={{ color: '#fbbf24', fontWeight: 600 }}>
-              line {frame.line_number}
-            </span>
-            {frame.column !== null && frame.column !== undefined && (
-              <>
-                <span style={{ color: 'rgba(252,165,165,0.5)' }}>:</span>
-                <span style={{ color: '#fbbf24' }}>col {frame.column}</span>
-              </>
-            )}
-            {frame.function_name && (
-              <>
-                <span style={{ color: 'rgba(252,165,165,0.5)', marginLeft: 4 }}>in</span>
-                <span style={{ color: '#818cf8', fontWeight: 600 }}>
-                  {frame.function_name}
-                </span>
-              </>
-            )}
-          </div>
-
-          {/* Code line display */}
-          {frame.code_line && (
-            <div style={{ padding: '12px 14px' }}>
-              <div
-                style={{
-                  display: 'flex',
-                  alignItems: 'flex-start',
-                  gap: 12,
-                }}
-              >
-                <span
-                  style={{
-                    color: 'rgba(252,165,165,0.4)',
-                    fontSize: 11,
-                    fontFamily: 'ui-monospace, monospace',
-                    minWidth: 32,
-                    textAlign: 'right',
-                    paddingTop: 2,
-                    userSelect: 'none',
-                  }}
-                >
-                  {frame.line_number}
-                </span>
-                <pre
-                  style={{
-                    margin: 0,
-                    fontFamily: 'ui-monospace, monospace',
-                    fontSize: 12,
-                    lineHeight: 1.6,
-                    color: '#fca5a5',
-                    whiteSpace: 'pre-wrap',
-                    wordBreak: 'break-word',
-                    flex: 1,
-                  }}
-                >
-                  {frame.code_line}
-                </pre>
-              </div>
-            </div>
-          )}
-
-          {/* If no code line, show a helpful message */}
-          {!frame.code_line && (
-            <div style={{ padding: '12px 14px', fontSize: 11, color: 'rgba(252,165,165,0.5)' }}>
-              <span style={{ fontStyle: 'italic' }}>Source code not available</span>
-              {frame.file_path === '<unknown>' && (
-                <span style={{ marginLeft: 8, color: 'rgba(252,165,165,0.4)' }}>
-                  (Error occurred in dynamically evaluated code)
-                </span>
-              )}
-            </div>
-          )}
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function StatusBadge({ status }: { status: string }) {
-  const styles: Record<string, { bg: string; color: string; label: string }> = {
-    new: { bg: 'rgba(99,102,241,0.15)', color: '#818cf8', label: '● New' },
-    existing: { bg: 'rgba(245,158,11,0.15)', color: '#fbbf24', label: '◎ Existing' },
-    regression: { bg: 'rgba(239,68,68,0.15)', color: '#f87171', label: '⚠ Regression' },
-  };
-  const s = styles[status] ?? styles.new;
-  return (
-    <span style={{
-      display: 'inline-block', padding: '4px 10px', borderRadius: 5,
-      background: s.bg, color: s.color, fontSize: 11, fontWeight: 600,
-    }}>
-      {s.label}
-    </span>
-  );
-}
-
 // ── Solution meta line ────────────────────────────────────────────────────────
 
 function SolutionMeta({ sol }: { sol: SolutionData | KbSolution }) {
@@ -321,17 +167,84 @@ function SolutionMeta({ sol }: { sol: SolutionData | KbSolution }) {
   );
 }
 
+// ── Parsed Stack Trace ────────────────────────────────────────────────────────
+
+function ParsedStackTraceView({ parsedTrace }: { parsedTrace: ParsedStackTrace }) {
+  if (!parsedTrace.frames || parsedTrace.frames.length === 0) {
+    return (
+      <pre style={{
+        margin: 0, fontFamily: 'ui-monospace, monospace', fontSize: 12,
+        lineHeight: 1.8, color: '#fca5a5',
+        background: 'rgba(239,68,68,0.06)', border: '1px solid rgba(239,68,68,0.15)',
+        borderRadius: 8, padding: '18px 20px',
+        whiteSpace: 'pre-wrap', wordBreak: 'break-word', minHeight: 140,
+      }}>
+        {parsedTrace.raw_trace}
+      </pre>
+    );
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      {parsedTrace.frames.map((frame, idx) => (
+        <div key={idx} style={{
+          background: 'rgba(239,68,68,0.04)', border: '1px solid rgba(239,68,68,0.12)',
+          borderRadius: 8, overflow: 'hidden',
+        }}>
+          <div style={{
+            padding: '10px 14px', background: 'rgba(239,68,68,0.06)',
+            borderBottom: '1px solid rgba(239,68,68,0.12)',
+            display: 'flex', alignItems: 'center', gap: 8, fontSize: 12,
+          }}>
+            <span style={{ color: '#fca5a5', fontWeight: 600 }}>{frame.file_path}</span>
+            <span style={{ color: 'rgba(252,165,165,0.5)' }}>:</span>
+            <span style={{ color: '#fbbf24', fontWeight: 600 }}>line {frame.line_number}</span>
+            {frame.column != null && (
+              <><span style={{ color: 'rgba(252,165,165,0.5)' }}>:</span>
+                <span style={{ color: '#fbbf24' }}>col {frame.column}</span></>
+            )}
+            {frame.function_name && (
+              <><span style={{ color: 'rgba(252,165,165,0.5)', marginLeft: 4 }}>in</span>
+                <span style={{ color: '#818cf8', fontWeight: 600 }}>{frame.function_name}</span></>
+            )}
+          </div>
+          {frame.code_line ? (
+            <div style={{ padding: '12px 14px' }}>
+              <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+                <span style={{
+                  color: 'rgba(252,165,165,0.4)', fontSize: 11, fontFamily: 'ui-monospace, monospace',
+                  minWidth: 32, textAlign: 'right', paddingTop: 2, userSelect: 'none',
+                }}>{frame.line_number}</span>
+                <pre style={{
+                  margin: 0, fontFamily: 'ui-monospace, monospace', fontSize: 12,
+                  lineHeight: 1.6, color: '#fca5a5', whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-word', flex: 1,
+                }}>{frame.code_line}</pre>
+              </div>
+            </div>
+          ) : (
+            <div style={{ padding: '12px 14px', fontSize: 11, color: 'rgba(252,165,165,0.5)' }}>
+              <span style={{ fontStyle: 'italic' }}>Source code not available</span>
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // ── Main component ────────────────────────────────────────────────────────────
 
 export function ErrorDetailModal({
-  row, errorHash, projectName: projectNameProp, onClose,
+  row, errorHash, projectName: projectNameProp, onClose, onRefresh,
 }: {
   row?: ErrorRow;
   errorHash?: string;
   projectName?: string;
   onClose: () => void;
+  /** Called after a resolve/reopen so the parent list can re-fetch. */
+  onRefresh?: () => void;
 }) {
-  const navigate = useNavigate();
   const effectiveErrorHash = row?.error_hash || errorHash;
   const isModal = !!row;
 
@@ -348,7 +261,7 @@ export function ErrorDetailModal({
   const KB_PAGE = 5;
 
   // ── Versions panel ───────────────────────────────────────────────────────
-  const [versionsFor, setVersionsFor] = useState<string | null>(null); // solution id
+  const [versionsFor, setVersionsFor] = useState<string | null>(null);
   const [versions, setVersions] = useState<KbSolution[]>([]);
   const [loadingVersions, setLoadingVersions] = useState(false);
 
@@ -369,22 +282,24 @@ export function ErrorDetailModal({
 
   const isResolved = errorStatus === 'resolved';
   const isReopened = errorStatus === 'reopened';
-  const isOpen = !isResolved && !isReopened;
 
-  // Active solution from backend (used in resolved view)
+  // The solution stored on the error row (used/previously used)
   const activeSolution = data?.solution ?? null;
 
-  // AI recommendation text + solutions (dedup against active solution)
+  // AI recommendation: top solution from ai_recommendation.solutions, sorted by confidence then usage
   const aiRec = data?.ai_recommendation ?? null;
   const aiText = aiRec?.recommendation ?? null;
-  const aiSolutions = (aiRec?.solutions ?? [])
-    .filter(s => s?.solution)
-    .filter(s => !activeSolution?.id || s.id !== activeSolution.id)
-    .sort((a, b) => {
+  // Pick the single best AI-recommended solution to display (highest confidence → usage)
+  const aiTopSolution: KbSolution | null = (() => {
+    const sols = (aiRec?.solutions ?? []).filter(s => s?.solution);
+    if (sols.length === 0) return null;
+    return [...sols].sort((a, b) => {
       const cd = (b.confidence_score ?? 0) - (a.confidence_score ?? 0);
-      if (cd !== 0) return cd;
-      return (b.usage_count ?? 0) - (a.usage_count ?? 0);
-    });
+      return cd !== 0 ? cd : (b.usage_count ?? 0) - (a.usage_count ?? 0);
+    })[0];
+  })();
+
+  const hasAiContent = !!(aiText || aiTopSolution);
 
   // ── Data fetching ─────────────────────────────────────────────────────────
 
@@ -397,7 +312,7 @@ export function ErrorDetailModal({
       .then((d: ErrorDetailData) => {
         setData(d);
         setNotFound(false);
-        // Reset KB pagination whenever we re-load the error
+        // Reset KB pagination whenever detail reloads
         setKbSolutions([]);
         setKbOffset(0);
         setKbTotal(0);
@@ -408,20 +323,31 @@ export function ErrorDetailModal({
 
   useEffect(() => { loadDetail(); }, [effectiveErrorHash, projectNameProp]);
 
-  // Load first page of KB solutions whenever data loads and error is open/reopened
+  // Load first KB page after data arrives (only for open/reopened states)
   useEffect(() => {
     if (!data || isResolved) return;
-    loadKbPage(0);
-  }, [data?.error_hash, isResolved]);
+    setKbSolutions([]);
+    setKbOffset(0);
+    setKbTotal(0);
+    loadKbPage(0, data);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data?.error_message, data?.error_status]);
 
-  function loadKbPage(offset: number) {
-    if (!data?.error_hash) return;
+  /**
+   * Fetch a page of existing solutions.
+   * Queries by error_hash + project_name (NOT by log row id) so every
+   * occurrence of the same project+error sees the same solution pool.
+   */
+  function loadKbPage(offset: number, errorData: ErrorDetailData) {
+    if (!errorData?.error_message && !errorData?.error_hash) return;
     setKbLoading(true);
     const qs = new URLSearchParams({
-      error_hash: data.error_hash,
       limit: String(KB_PAGE),
       offset: String(offset),
-      ...(projectName ? { project_name: projectName } : {}),
+      ...(errorData.error_message ? { error_message: errorData.error_message } : {}),
+      // error_hash kept as fallback for the backend's legacy path
+      ...(errorData.error_hash ? { error_hash: errorData.error_hash } : {}),
+      ...(errorData.project_name ? { project_name: errorData.project_name } : {}),
     });
     apiFetch(`/api/knowledge_base/top?${qs}`)
       .then(r => r.json())
@@ -446,7 +372,7 @@ export function ErrorDetailModal({
     } finally { setLoadingVersions(false); }
   }
 
-  // ── "Use solution" — resolves in-place, no navigation ────────────────────
+  // ── "Use solution" — resolves in-place, closes modal, refreshes parent ────
 
   async function useSolution(solutionId: string) {
     if (!effectiveErrorHash || !projectName) return;
@@ -456,14 +382,19 @@ export function ErrorDetailModal({
       const r = await apiFetch('/api/knowledge_base/use', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ solution_id: solutionId, error_hash: effectiveErrorHash, project_name: projectName }),
+        body: JSON.stringify({
+          solution_id: solutionId,
+          error_hash: effectiveErrorHash,
+          project_name: projectName,
+        }),
       });
       if (!r.ok) throw new Error((await r.json()).error ?? 'Failed');
       const j = await r.json();
-      // Update UI in-place: mark resolved and refresh solution with latest metrics
+      // Update local state so if the parent doesn't navigate away we still show resolved
       setData(prev => prev ? {
         ...prev,
         error_status: 'resolved',
+        resolved_at: new Date().toISOString(),
         solution: {
           id: j.solution_id,
           solution: j.solution,
@@ -475,6 +406,8 @@ export function ErrorDetailModal({
           updated_at: null,
         },
       } : prev);
+      onRefresh?.();
+      onClose();
     } catch (e) {
       setActionError(e instanceof ApiError ? e.label : String(e));
     } finally { setActionBusy(false); }
@@ -493,14 +426,15 @@ export function ErrorDetailModal({
         body: JSON.stringify({ error_hash: effectiveErrorHash, project_name: projectName }),
       });
       if (!r.ok) throw new Error((await r.json()).error ?? 'Failed');
-      // Reload full detail so KB solutions are fresh
+      onRefresh?.();
+      // Reload full detail so KB solutions are fresh and state switches to reopened
       loadDetail();
     } catch (e) {
       setActionError(e instanceof ApiError ? e.label : String(e));
     } finally { setActionBusy(false); }
   }
 
-  // ── Delete solution ───────────────────────────────────────────────────────
+  // ── Delete solution (entire family) ──────────────────────────────────────
 
   async function handleDeleteSolution(solutionId: string) {
     if (!effectiveErrorHash) return;
@@ -530,7 +464,7 @@ export function ErrorDetailModal({
     }
   }
 
-  // ── Editor: save new solution ─────────────────────────────────────────────
+  // ── Editor: save new / improved solution ─────────────────────────────────
 
   async function handleSave(forceCreate = false) {
     if (!effectiveErrorHash || !editorText.trim()) return;
@@ -538,17 +472,22 @@ export function ErrorDetailModal({
     setEditorError('');
     setDuplicatePrompt(null);
     try {
-      // 1. Check-only first
+      // 1. Check for duplicates first
       const previewPayload: Record<string, unknown> = {
-        error_hash: effectiveErrorHash, solution: editorText.trim(),
-        project_name: projectName, check_only: !forceCreate,
+        error_hash: effectiveErrorHash,
+        error_message: errorMessage || undefined,
+        solution: editorText.trim(),
+        project_name: projectName,
+        check_only: !forceCreate,
         ...(forceCreate ? { create_anyway: true } : {}),
       };
       const previewRes = await apiFetch('/api/knowledge_base', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(previewPayload),
       });
       const preview = await previewRes.json();
+
       if (preview?.duplicate_prompt && !forceCreate) {
         setDuplicatePrompt({
           solution_id: preview.solution_id,
@@ -566,16 +505,19 @@ export function ErrorDetailModal({
 
       // 2. Actual save (check_only: false)
       const saveRes = await apiFetch('/api/knowledge_base', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...previewPayload, check_only: false }),
       });
       const saved = await saveRes.json();
 
-      // 3. Auto-use (resolve) with the new or duplicate solution
+      // 3. Auto-use (resolve) with the new or found solution id
       const idToUse = saved.duplicate ? saved.solution_id : saved.id;
-      if (idToUse) await useSolution(idToUse);
-      else loadDetail();
-
+      if (idToUse) {
+        await useSolution(idToUse);
+      } else {
+        loadDetail();
+      }
       setEditorText('');
     } catch (e) {
       setEditorError(e instanceof ApiError ? e.label : 'Failed to save solution.');
@@ -588,12 +530,12 @@ export function ErrorDetailModal({
     await useSolution(duplicatePrompt.solution_id);
   }
 
-  // ── Improve: pre-fill editor with existing solution ───────────────────────
+  // ── Improve: pre-fill editor with existing solution text ─────────────────
 
   function handleImprove(solutionText: string) {
     setEditorText(solutionText);
-    // scroll textarea into view
     setTimeout(() => {
+      document.getElementById('airbrake-solution-editor')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
       document.getElementById('airbrake-solution-editor')?.focus();
     }, 50);
   }
@@ -647,9 +589,7 @@ export function ErrorDetailModal({
             {actionBusy ? 'Working…' : 'Use'}
           </button>
           {opts.showImprove && (
-            <button onClick={() => handleImprove(sol.solution!)} style={btnSecondary}>
-              Improve
-            </button>
+            <button onClick={() => handleImprove(sol.solution!)} style={btnSecondary}>Improve</button>
           )}
           {sol.id && (
             <button onClick={() => loadVersions(sol.id!)} disabled={loadingVersions} style={btnSecondary}>
@@ -657,11 +597,10 @@ export function ErrorDetailModal({
             </button>
           )}
           {opts.showDelete && sol.id && (
-            <button onClick={() => handleDeleteSolution(sol.id!)} disabled={actionBusy} style={btnDanger}>
-              Delete
-            </button>
+            <button onClick={() => handleDeleteSolution(sol.id!)} disabled={actionBusy} style={btnDanger}>Delete</button>
           )}
         </div>
+
         {/* Version panel */}
         {isActiveInVersions && (
           <div style={{ marginTop: 10, padding: 10, borderRadius: 8, background: 'rgba(0,0,0,0.15)', border: '1px solid var(--card-border)' }}>
@@ -673,7 +612,7 @@ export function ErrorDetailModal({
                 <SolutionMeta sol={v} />
                 <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
                   <button onClick={() => useSolution(v.id!)} disabled={actionBusy || !v.id} style={{ ...btnPrimary, padding: '5px 12px' }}>Use</button>
-                  <button onClick={() => handleDeleteVersion(sol.id!, v.id!)} style={{ ...btnDanger, padding: '5px 12px' }}>Delete</button>
+                  <button onClick={() => handleDeleteVersion(sol.id!, v.id!)} style={{ ...btnDanger, padding: '5px 12px' }}>Delete Version</button>
                 </div>
               </div>
             ))}
@@ -684,6 +623,8 @@ export function ErrorDetailModal({
   }
 
   // ── RESOLVED STATE ────────────────────────────────────────────────────────
+  // Only shows the solution that was actually used on this specific error row.
+  // Does NOT search the KB — reads from data.solution only.
 
   function renderResolved() {
     return (
@@ -697,41 +638,35 @@ export function ErrorDetailModal({
             ✓ Resolved
           </div>
           {data?.resolved_at && (
-            <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-              Resolved {fmt(data.resolved_at)}
-            </div>
+            <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Resolved {fmt(data.resolved_at)}</div>
           )}
         </div>
 
-        {/* Solution that was used */}
+        {/* Solution used */}
         {activeSolution?.solution ? (
           <div style={{
             padding: 16, borderRadius: 10,
             background: 'rgba(99,102,241,0.08)', border: '1px solid rgba(99,102,241,0.2)',
           }}>
             <div style={{ ...sectionLabel, color: '#818cf8' }}>💡 Solution Used</div>
-            <div style={{ fontSize: 13, lineHeight: 1.7, color: 'var(--text)', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+            <div style={{ fontSize: 13, lineHeight: 1.7, color: 'var(--text)', whiteSpace: 'pre-wrap', wordBreak: 'break-word', marginBottom: 6 }}>
               {activeSolution.solution}
             </div>
-            <SolutionMeta sol={activeSolution} />
+            <div style={metaRow}>
+              {activeSolution.version != null && <span>v{activeSolution.version}</span>}
+              {activeSolution.confidence_score != null && (
+                <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  Confidence: <ConfidenceBar score={activeSolution.confidence_score} />
+                </span>
+              )}
+              {activeSolution.usage_count != null && <span>Used {activeSolution.usage_count}×</span>}
+              {activeSolution.created_by && <span>Resolved by {activeSolution.created_by}</span>}
+              {data?.resolved_at && <span>{fmt(data.resolved_at)}</span>}
+            </div>
           </div>
         ) : (
           <div style={{ fontSize: 13, color: 'var(--text-muted)', padding: '12px 0' }}>
             No solution record found for this resolution.
-            {data?.parsed_stacktrace && data.parsed_stacktrace.frames && data.parsed_stacktrace.frames.length > 0 ? (
-              <ParsedStackTraceView parsedTrace={data.parsed_stacktrace} />
-            ) : data?.error_detail ? (
-              <pre style={{
-                margin: 0, fontFamily: 'ui-monospace, monospace', fontSize: 12,
-                lineHeight: 1.8, color: '#fca5a5',
-                background: 'rgba(239,68,68,0.06)', border: '1px solid rgba(239,68,68,0.15)',
-                borderRadius: 8, padding: '18px 20px',
-                whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-                minHeight: 140,
-              }}>
-                {data.error_detail}
-              </pre>
-            ) : null}
           </div>
         )}
 
@@ -752,8 +687,43 @@ export function ErrorDetailModal({
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 22 }}>
 
-        {/* ── 1. AI Recommendation ─────────────────────────────────────── */}
-        {(aiText || aiSolutions.length > 0) && (
+        {/* ── Reopened banner ─────────────────────────────────────────────── */}
+        {isReopened && (
+          <div style={{
+            padding: '14px 18px', borderRadius: 10,
+            background: 'rgba(248,113,113,0.08)', border: '1px solid rgba(248,113,113,0.25)',
+          }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: '#f87171', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 6 }}>
+              ↺ Reopened
+            </div>
+            <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+              This error has been reopened. Review the trace below, then continue with the open workflow.
+              {data?.reopened_at && ` Reopened ${fmt(data.reopened_at)}.`}
+            </div>
+          </div>
+        )}
+
+        {/* ── Previously Used Solution (read-only, shown only after reopen) ─ */}
+        {isReopened && activeSolution?.solution && (
+          <div style={{
+            padding: 16, borderRadius: 10,
+            background: 'rgba(248,113,113,0.06)', border: '1px solid rgba(248,113,113,0.18)',
+          }}>
+            <div style={{ ...sectionLabel, color: '#f87171' }}>🧾 Previously Used Solution</div>
+            <div style={{ fontSize: 13, lineHeight: 1.7, color: 'var(--text)', whiteSpace: 'pre-wrap', wordBreak: 'break-word', marginBottom: 6 }}>
+              {activeSolution.solution}
+            </div>
+            <div style={metaRow}>
+              {activeSolution.version != null && <span>v{activeSolution.version}</span>}
+              {activeSolution.created_by && <span>Resolved by {activeSolution.created_by}</span>}
+              {data?.resolved_at && <span>Resolved {fmt(data.resolved_at)}</span>}
+            </div>
+            {/* Read-only — no buttons */}
+          </div>
+        )}
+
+        {/* ── 1. AI Recommended Solution ──────────────────────────────────── */}
+        {hasAiContent && (
           <div style={{
             padding: 16, borderRadius: 10,
             background: 'rgba(56,189,248,0.07)', border: '1px solid rgba(56,189,248,0.2)',
@@ -762,58 +732,91 @@ export function ErrorDetailModal({
               <span>🤖</span>
               <span style={{ ...sectionLabel, color: '#38bdf8', marginBottom: 0 }}>AI Recommended Solution</span>
             </div>
+
+            {/* Explanation text from the AI */}
             {aiText && (
-              <div style={{ fontSize: 13, lineHeight: 1.7, color: 'var(--text)', marginBottom: aiSolutions.length > 0 ? 14 : 0 }}>
+              <div style={{ fontSize: 13, lineHeight: 1.7, color: 'var(--text)', marginBottom: aiTopSolution ? 14 : 0 }}>
                 {aiText}
               </div>
             )}
-            {aiSolutions.map((sol, i) => (
-              <div key={sol.id ?? i} style={{
-                padding: 12, borderRadius: 8, marginTop: 8,
+
+            {/* Single best solution card */}
+            {aiTopSolution && (
+              <div style={{
+                padding: 12, borderRadius: 8,
                 background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)',
               }}>
                 <div style={{ fontSize: 13, lineHeight: 1.7, color: 'var(--text)', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
-                  {sol.solution}
+                  {aiTopSolution.solution}
                 </div>
-                <SolutionMeta sol={sol} />
+                <SolutionMeta sol={aiTopSolution} />
                 <div style={{ marginTop: 10 }}>
+                  {/* Single button — calls the same useSolution endpoint as every other Use button */}
                   <button
-                    onClick={() => useSolution(sol.id!)}
-                    disabled={actionBusy || !sol.id}
+                    onClick={() => useSolution(aiTopSolution.id!)}
+                    disabled={actionBusy || !aiTopSolution.id}
                     style={{ ...btnPrimary, opacity: actionBusy ? 0.6 : 1 }}
                   >
                     {actionBusy ? 'Working…' : 'Use Recommended Solution'}
                   </button>
                 </div>
               </div>
-            ))}
+            )}
           </div>
         )}
 
-        {/* ── 2. Knowledge Base — top solutions ────────────────────────── */}
-        {(kbSolutions.length > 0 || kbLoading) && (
+        {/* ── 2. Stack Trace ────────────────────────────────────────────────── */}
+        {data?.error_detail && (
           <div>
-            <div style={sectionLabel}>💡 Solution History</div>
-            {kbSolutions
-              .filter(s => !activeSolution?.id || s.id !== activeSolution.id)
-              .map(sol => renderSolutionCard(sol, {
-                highlight: false,
-                showImprove: true,
-                showDelete: true,
-              })
-              )}
-            {kbLoading && (
-              <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: '8px 0' }}>Loading…</div>
-            )}
-            {hasMoreKb && !kbLoading && (
-              <button onClick={() => loadKbPage(kbOffset)} style={{ ...btnSecondary, marginTop: 4 }}>
-                More Solutions ({kbTotal - kbOffset} remaining)
-              </button>
+            <div style={sectionLabel}>📋 Stack Trace</div>
+            {data?.parsed_stacktrace && data.parsed_stacktrace.frames && data.parsed_stacktrace.frames.length > 0 ? (
+              <ParsedStackTraceView parsedTrace={data.parsed_stacktrace} />
+            ) : (
+              <pre style={{
+                margin: 0, fontFamily: 'ui-monospace, monospace', fontSize: 12,
+                lineHeight: 1.8, color: '#fca5a5',
+                background: 'rgba(239,68,68,0.06)', border: '1px solid rgba(239,68,68,0.15)',
+                borderRadius: 8, padding: '18px 20px',
+                whiteSpace: 'pre-wrap', wordBreak: 'break-word', minHeight: 140,
+              }}>
+                {data.error_detail}
+              </pre>
             )}
           </div>
         )}
 
-        {/* ── 3. New solution textarea ──────────────────────────────────── */}
+        {/* ── 3. Existing Solutions (KB) ──────────────────────────────────── */}
+        {/* Always shown (not just when solutions exist) so the Load More state
+            is visible even while loading the first page. Queried by
+            error_hash + project_name, so every occurrence of the same
+            project+error sees the same solution pool. */}
+        <div>
+          <div style={sectionLabel}>💡 Existing Solutions</div>
+
+          {kbSolutions.length === 0 && !kbLoading && (
+            <div style={{ fontSize: 13, color: 'var(--text-muted)', padding: '8px 0' }}>
+              No solutions yet for this error.
+            </div>
+          )}
+
+          {kbSolutions.map(sol => renderSolutionCard(sol, {
+            highlight: false,
+            showImprove: true,
+            showDelete: true,
+          }))}
+
+          {kbLoading && (
+            <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: '8px 0' }}>Loading…</div>
+          )}
+
+          {hasMoreKb && !kbLoading && (
+            <button onClick={() => loadKbPage(kbOffset, data!)} style={{ ...btnSecondary, marginTop: 4 }}>
+              Load More ({kbTotal - kbOffset} remaining)
+            </button>
+          )}
+        </div>
+
+        {/* ── 4. Create New Solution ────────────────────────────────────────── */}
         <div>
           <div style={sectionLabel}>✏️ Create New Solution</div>
           <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 10 }}>
@@ -851,34 +854,13 @@ export function ErrorDetailModal({
           </div>
         </div>
 
-        {/* ── 4. Stack Trace ────────────────────────────────────────────── */}
-        {data?.error_detail && (
-          <div>
-            <div style={sectionLabel}>📋 Stack Trace</div>
-            {data?.parsed_stacktrace && data.parsed_stacktrace.frames && data.parsed_stacktrace.frames.length > 0 ? (
-              <ParsedStackTraceView parsedTrace={data.parsed_stacktrace} />
-            ) : (
-              <pre style={{
-                margin: 0, fontFamily: 'ui-monospace, monospace', fontSize: 12,
-                lineHeight: 1.8, color: '#fca5a5',
-                background: 'rgba(239,68,68,0.06)', border: '1px solid rgba(239,68,68,0.15)',
-                borderRadius: 8, padding: '18px 20px',
-                whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-                minHeight: 140,
-              }}>
-                {data.error_detail}
-              </pre>
-            )}
-          </div>
-        )}
-
         {actionError && (
           <div style={{ fontSize: 12, color: '#f87171', padding: '8px 12px', borderRadius: 6, background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)' }}>
             {actionError}
           </div>
         )}
 
-        {/* Duplicate detection prompt overlay */}
+        {/* ── Duplicate detection overlay ───────────────────────────────────── */}
         {duplicatePrompt && (
           <div style={{
             position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)',
@@ -926,7 +908,7 @@ export function ErrorDetailModal({
       borderRadius: 14, width: '100%', maxWidth: 900,
       boxShadow: '0 24px 60px rgba(0,0,0,0.35)', overflow: 'hidden',
     }}>
-      {/* ── Header ─────────────────────────────────────────────────────── */}
+      {/* ── Header ────────────────────────────────────────────────────────── */}
       <div style={{
         display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between',
         padding: '20px 26px', borderBottom: '1px solid var(--card-border)',
@@ -989,12 +971,12 @@ export function ErrorDetailModal({
         >✕</button>
       </div>
 
-      {/* ── Body ───────────────────────────────────────────────────────── */}
+      {/* ── Body ──────────────────────────────────────────────────────────── */}
       <div style={{ overflow: 'auto', padding: '22px 26px', flex: 1 }}>
         {isResolved ? renderResolved() : renderOpen()}
       </div>
 
-      {/* ── Footer ─────────────────────────────────────────────────────── */}
+      {/* ── Footer ────────────────────────────────────────────────────────── */}
       <div style={{
         padding: '14px 26px', borderTop: '1px solid var(--card-border)',
         display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 12,
@@ -1004,8 +986,7 @@ export function ErrorDetailModal({
             onClick={handleReopen}
             disabled={actionBusy}
             style={{
-              ...btnDanger,
-              padding: '8px 20px', fontSize: 13,
+              ...btnDanger, padding: '8px 20px', fontSize: 13,
               opacity: actionBusy ? 0.7 : 1,
               cursor: actionBusy ? 'not-allowed' : 'pointer',
             }}

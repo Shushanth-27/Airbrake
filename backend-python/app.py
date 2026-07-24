@@ -1426,7 +1426,11 @@ def get_break_detail(error_hash):
         ai_recommendation = None
         try:
             debug_info["solution_stage"] = "loading_ai"
-            ai_recommendation = get_ai_recommendations(error_hash, project_name)
+            ai_recommendation = get_ai_recommendations(
+                error_hash,
+                project_name,
+                error_message=first["error_message"],
+            )
             debug_info["ai_stage"] = "ai_executed"
         except Exception as e:
             print(f"[Breaks] ai recommendation error: {e}")
@@ -1659,14 +1663,24 @@ def delete_solution_version_route(solution_id, version_id):
 
 @app.route("/api/knowledge_base/top", methods=["GET"])
 def get_top_solutions_route():
-    error_hash = request.args.get("error_hash")
-    project_name = request.args.get("project_name")
-    limit = int(request.args.get("limit", "5"))
-    offset = int(request.args.get("offset", "0"))
-    if not error_hash:
-        return jsonify({"error": "error_hash is required"}), 400
+    # Primary key: error_message (normalized in get_top_solutions).
+    # error_hash accepted for backward-compat but ignored when error_message is present.
+    error_message = request.args.get("error_message", "").strip()
+    error_hash    = request.args.get("error_hash", "").strip()
+    project_name  = request.args.get("project_name")
+    limit         = int(request.args.get("limit", "5"))
+    offset        = int(request.args.get("offset", "0"))
+
+    if not error_message and not error_hash:
+        return jsonify({"error": "error_message or error_hash is required"}), 400
     try:
-        rows, total = get_top_solutions(error_hash, project_name, limit=limit, offset=offset)
+        rows, total = get_top_solutions(
+            error_message=error_message,
+            project_name=project_name,
+            limit=limit,
+            offset=offset,
+            error_hash=error_hash or None,
+        )
         return jsonify({"solutions": rows, "total": total})
     except Exception as e:
         import traceback; traceback.print_exc()
@@ -1699,16 +1713,18 @@ def get_error_solution(error_hash):
 @app.route("/api/knowledge_base", methods=["POST"])
 def upsert_error_solution():
     body = request.get_json() or {}
-    error_hash = body.get("error_hash")
-    solution = body.get("solution")
-    created_by = body.get("created_by") or "developer"
+    error_hash   = body.get("error_hash")
+    solution     = body.get("solution")
+    created_by   = body.get("created_by") or "developer"
     project_name = body.get("project_name")
+    # error_message is the primary group-key lookup text — passed through to insert_solution
+    error_message    = body.get("error_message") or None
     base_solution_id = body.get("base_solution_id")
     if not error_hash:
         return jsonify({"error": "error_hash is required"}), 400
     if not solution:
         return jsonify({"error": "solution is required"}), 400
-    check_only = bool(body.get("check_only"))
+    check_only   = bool(body.get("check_only"))
     force_create = bool(body.get("create_anyway") or body.get("force_create"))
     try:
         row = insert_solution(
@@ -1719,6 +1735,7 @@ def upsert_error_solution():
             base_solution_id=base_solution_id,
             force_create=force_create,
             check_only=check_only,
+            error_message=error_message,
         )
         status_code = 200 if check_only else 201
         return jsonify(serialize_row(row)), status_code
@@ -1739,20 +1756,70 @@ def upsert_error_solution():
 
 @app.route("/api/knowledge_base/<error_hash>", methods=["DELETE"])
 def delete_error_solution(error_hash):
+    """Delete all solution versions for the group that owns this occurrence.
+
+    error_hash is the occurrence-specific hash from the log row.
+    Solutions are stored under a group_key (MD5 of normalized error message),
+    which differs from the occurrence hash.  We resolve the group_key by:
+      1. Looking up the log row for this occurrence hash to get the error text.
+      2. Deriving the group_key from that text.
+      3. Falling back to deleting by the raw error_hash if resolution fails
+         (handles pre-migration solution rows that stored occurrence hashes).
+    """
     project_name = request.args.get("project_name")
     try:
-        if project_name:
-            execute(
-                f"DELETE FROM {TABLE} WHERE row_type = 'solution' AND error_hash = %s AND LOWER(project_name) = LOWER(%s)",
-                (error_hash, project_name),
+        from ai.error_matching import derive_solution_group_key
+
+        # Resolve the group_key from the occurrence hash via the log row
+        group_key = None
+        try:
+            log_conditions = ["row_type = 'log'", "error IS NOT NULL"]
+            log_params: list = []
+            if project_name:
+                log_conditions.insert(0, "LOWER(project_name) = LOWER(%s)")
+                log_params.insert(0, project_name)
+            hash_candidates = build_error_hash_candidates(error_hash, None)
+            if hash_candidates:
+                log_conditions.append(
+                    f"({' OR '.join(['error_hash = %s'] * len(hash_candidates))})"
+                )
+                log_params.extend(hash_candidates)
+            else:
+                log_conditions.append("error_hash = %s")
+                log_params.append(error_hash)
+            log_rows = query(
+                f"SELECT error FROM {TABLE} WHERE {' AND '.join(log_conditions)} "
+                f"ORDER BY timestamp DESC LIMIT 1",
+                tuple(log_params),
             )
-        else:
-            execute(
-                f"DELETE FROM {TABLE} WHERE row_type = 'solution' AND error_hash = %s",
-                (error_hash,),
-            )
+            if log_rows and log_rows[0].get("error"):
+                group_key = derive_solution_group_key(log_rows[0]["error"])
+        except Exception as _resolve_exc:
+            logger.exception("[DeleteSolution] Group-key resolution failed: %s", _resolve_exc)
+
+        # Attempt delete by resolved group_key first, then fall back to raw hash
+        keys_to_try = list(dict.fromkeys(filter(None, [group_key, error_hash])))
+
+        for key in keys_to_try:
+            if project_name:
+                execute(
+                    f"DELETE FROM {TABLE} WHERE row_type = 'solution' "
+                    f"AND error_hash = %s AND LOWER(project_name) = LOWER(%s)",
+                    (key, project_name),
+                )
+            else:
+                execute(
+                    f"DELETE FROM {TABLE} WHERE row_type = 'solution' AND error_hash = %s",
+                    (key,),
+                )
+
+        logger.info(
+            "[DeleteSolution] Deleted solutions keys=%r project=%r",
+            keys_to_try, project_name,
+        )
         return make_response("", 204)
     except Exception as e:
+        logger.exception("[DeleteSolution] Failed: %s", e)
         import traceback; traceback.print_exc()
         return jsonify({"error": str(e), "exception": type(e).__name__}), 500
 
