@@ -2,29 +2,26 @@
 
 The public response shape remains unchanged so the frontend does not need to change.
 
-Retrieval strategy (semantic-first, three-tier):
-  TIER 1 — Pinecone semantic search scoped to project_name (no hash filter).
-            Fetches up to PINECONE_CANDIDATE_LIMIT solution IDs by vector similarity,
-            then hydrates rows from Aurora.
-            Skipped when project_name is absent (would return cross-project data).
-  TIER 2 — Aurora in-process scan.  Used when Pinecone is unavailable.
-            Fetches all solution rows for the project (up to AURORA_SCAN_LIMIT),
-            computes cosine similarity in Python, keeps rows above SIM_THRESHOLD.
-            Skipped when project_name is absent (would return cross-project data).
-  TIER 3 — Original hash-exact SQL fallback.  Used when embeddings are unavailable
-            (Bedrock down), when TIER 1+2 return nothing, or when project_name is
-            absent.  Logs a warning when project_name is missing so operators know
-            the request is running without project isolation.
+Grouping key
+────────────
+Retrieval uses  project_name + AI semantic matching  as the primary lookup
+strategy.  When a semantic match is found by the LLM (TIER 0), its group key
+is used directly to load solutions.  The remaining tiers (embedding + exact
+key) are fallbacks for when the LLM is unavailable or returns NO_MATCH.
 
-Hash equality is used only in TIER 3 and as a tiebreaker log field — never as the
-primary retrieval gate.  This allows solutions saved for Error Hash A to surface for
-semantically similar Error Hash B inside the same project.
+Retrieval strategy (AI-first, four-tier):
+  TIER 0 — AI semantic group match (find_matching_solution_group).
+            Asks Nova Lite whether the incoming error belongs to any known
+            solution group in this project.  Returns the matched group_key
+            and loads solutions from that group directly.  No embeddings needed.
+            Skipped when project_name is absent or LLM is unavailable.
+  TIER 1 — Pinecone semantic search scoped to project_name (no hash filter).
+  TIER 2 — Aurora in-process cosine scan (project-wide, cross-hash).
+  TIER 3 — Group-key SQL lookup using derive_solution_group_key(error_message).
 
 Project isolation guarantee
-  TIER 1 and TIER 2 are only executed when project_name is provided.
-  They will never be run without a project filter, preventing cross-project leaks.
-  TIER 3 preserves backward compatibility for callers that omit project_name,
-  but logs a warning so the gap can be remediated at the call site.
+  All tiers are scoped to project_name.  TIER 0 structurally cannot leak
+  cross-project data (the matcher only loads groups for the given project).
 """
 
 from __future__ import annotations
@@ -34,6 +31,7 @@ import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 from ai.embeddings import EMBEDDING_DIM
+from ai.error_matching import derive_solution_group_key
 from db import query
 
 logger = logging.getLogger(__name__)
@@ -134,8 +132,22 @@ def _rank_candidates(
 
 # ── Candidate fetch helpers (three tiers) ────────────────────────────────────
 
-def _fetch_error_text(error_hash: str, project_name: Optional[str]) -> Tuple[str, str]:
-    """Return (error_message, error_detail) for the given hash."""
+def _fetch_error_text(
+    error_hash: str,
+    project_name: Optional[str],
+    error_message: Optional[str] = None,
+) -> Tuple[str, str]:
+    """Return (error_message, error_detail) for the given error.
+
+    When error_message is already supplied by the caller it is used directly —
+    no DB round-trip needed.  Falls back to a hash-based query only when the
+    text is not available.
+    """
+    # Caller already knows the error text — use it directly
+    if error_message and error_message.strip():
+        return error_message.strip(), ""
+
+    # Fall back to DB lookup by occurrence hash
     conditions = [
         "row_type = 'log'",
         "(error_hash = %s OR MD5(LOWER(TRIM(error))) = %s)",
@@ -273,18 +285,95 @@ def _tier2_aurora_scan(
         return []
 
 
-def _tier3_hash_fallback(
-    error_hash: str,
+def _tier0_ai_group_match(
+    error_text: str,
     project_name: Optional[str],
 ) -> List[Dict[str, Any]]:
-    """TIER 3 — Original hash-exact SQL lookup.
+    """TIER 0 — AI semantic group match (primary, LLM-based).
 
-    Preserved for backward compatibility and when Bedrock is unavailable.
-    Always logs to make degraded operation visible.
+    Calls find_matching_solution_group() to ask Nova Lite whether the incoming
+    error belongs to any known solution group in this project.  When a match is
+    found, fetches all solutions for that group directly from Aurora and returns
+    them — no embeddings, no cosine scan.
+
+    Returns [] when:
+    - project_name is absent (project isolation requirement)
+    - LLM is unavailable or returns NO_MATCH
+    - No solutions exist for the matched group
+    - Any DB or import error
+    """
+    if not project_name or not error_text:
+        return []
+
+    try:
+        from ai.semantic_group_matcher import find_matching_solution_group
+        matched_key = find_matching_solution_group(error_text, project_name)
+    except Exception as exc:
+        logger.exception("[Recommendation] TIER 0 import/call failed: %s", exc)
+        return []
+
+    if not matched_key:
+        logger.info("[Recommendation] TIER 0 AI match: NO_MATCH for project=%r", project_name)
+        return []
+
+    # Load all solutions for the matched group
+    try:
+        rows = query(
+            f"SELECT id, solution, created_by, created_at, "
+            f"usage_count, confidence_score, version, embedding "
+            f"FROM {TABLE} "
+            f"WHERE row_type = 'solution' "
+            f"  AND error_hash = %s "
+            f"  AND LOWER(project_name) = LOWER(%s) "
+            f"ORDER BY confidence_score DESC, usage_count DESC, created_at DESC "
+            f"LIMIT %s",
+            (matched_key, project_name, RANK_LIMIT),
+        )
+        logger.info(
+            "[Recommendation] TIER 0 AI match: group_key=%r project=%r solutions=%d",
+            matched_key, project_name, len(rows),
+        )
+        return rows
+    except Exception as exc:
+        logger.exception("[Recommendation] TIER 0 solution load failed: %s", exc)
+        return []
+
+
+def _tier3_group_key_fallback(
+    error_message: str,
+    project_name: Optional[str],
+    occurrence_hash: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """TIER 3 — Group-key SQL lookup (replaces the old hash-exact fallback).
+
+    Queries solution rows whose error_hash == derive_solution_group_key(error_message).
+    This is the same key written by insert_solution(), so all occurrences of the
+    same error text share results regardless of their occurrence-specific hash.
+
+    Falls back to occurrence_hash when error_message is blank, preserving
+    backward compatibility for callers that haven't been updated yet.
     """
     try:
+        # Derive the group key from the normalised error text
+        group_key: Optional[str] = None
+        if error_message and error_message.strip():
+            group_key = derive_solution_group_key(error_message)
+
+        if not group_key and occurrence_hash:
+            # Old behaviour: treat the raw hash as the key (solutions created
+            # before this migration will still be found this way)
+            group_key = occurrence_hash
+            logger.warning(
+                "[Recommendation] TIER 3 falling back to occurrence hash — "
+                "no error_message available, hash=%r", occurrence_hash
+            )
+
+        if not group_key:
+            logger.warning("[Recommendation] TIER 3 skipped — no group_key or hash available")
+            return []
+
         sol_conditions: List[str] = ["row_type = 'solution'", "error_hash = %s"]
-        sol_params: List[Any]     = [error_hash]
+        sol_params: List[Any]     = [group_key]
         if project_name:
             sol_conditions.append("LOWER(project_name) = LOWER(%s)")
             sol_params.append(project_name)
@@ -298,14 +387,14 @@ def _tier3_hash_fallback(
             f"LIMIT %s",
             tuple(sol_params + [RANK_LIMIT]),
         )
-        logger.info("[Recommendation] TIER 3 hash fallback: hash=%r project=%r rows=%d",
-                    error_hash, project_name, len(rows))
+        logger.info(
+            "[Recommendation] TIER 3 group-key fallback: group_key=%r project=%r rows=%d",
+            group_key, project_name, len(rows),
+        )
         return rows
 
     except Exception as exc:
-        logger.exception(
-            "[Aurora] TIER 3 hash fallback failed: %s", exc
-        )
+        logger.exception("[Aurora] TIER 3 group-key fallback failed: %s", exc)
         return []
 
 
@@ -315,33 +404,52 @@ def get_similar_solutions(
     error_hash: str,
     project_name: Optional[str] = None,
     limit: int = 10,
+    error_message: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Return up to *limit* solutions ranked by semantic similarity.
 
-    Retrieval is semantic-first, project-scoped, with three fallback tiers:
+    Retrieval tiers (AI-first):
+      TIER 0: AI semantic group match — asks Nova Lite to identify the matching
+              solution group by meaning, not wording.  When matched, solutions
+              are loaded from that group and returned immediately (no embeddings).
       TIER 1: Pinecone vector search (project-wide, cross-hash)
       TIER 2: Aurora in-process cosine scan (project-wide, cross-hash)
-      TIER 3: Hash-exact SQL (backward-compatible, original behaviour)
+      TIER 3: Group-key SQL (queries by derive_solution_group_key(error_message))
 
-    Response shape is unchanged regardless of which tier provided candidates.
+    error_message is the canonical lookup text.  error_hash is retained as a
+    fallback for callers that haven't been updated yet.
     """
     create_embedding, cosine_similarity = _get_embeddings()
 
-    # Step 1: fetch error text to build the query embedding ───────────────────
+    # Step 1: resolve error text ───────────────────────────────────────────────
     try:
-        error_text, detail_text = _fetch_error_text(error_hash, project_name)
+        error_text, detail_text = _fetch_error_text(error_hash, project_name, error_message)
     except Exception as exc:
         logger.exception("[Recommendations] Error text fetch failed: %s", exc)
         return []
 
     if not error_text and not detail_text:
-        logger.info("[Recommendations] No error text found for hash=%r — returning empty",
-                    error_hash)
+        logger.info(
+            "[Recommendations] No error text found for hash=%r message=%r — returning empty",
+            error_hash, error_message,
+        )
         return []
 
     query_text = f"{error_text}\n\n{detail_text}".strip() or error_text
 
-    # Step 2: generate query embedding ────────────────────────────────────────
+    # ── TIER 0: AI semantic group match (primary path) ────────────────────────
+    # Attempt this first.  When it succeeds we return immediately without
+    # touching Pinecone or Bedrock embeddings.
+    if project_name:
+        tier0_candidates = _tier0_ai_group_match(error_text, project_name)
+        if tier0_candidates:
+            ranked = tier0_candidates[:limit]
+            logger.info(
+                "[Recommendation] Returning %d solutions via TIER 0 (AI match)", len(ranked)
+            )
+            return [_serialize_solution(r) for r in ranked]
+
+    # ── Step 2: generate query embedding (needed for TIER 1 / TIER 2) ─────────
     query_vec: Optional[List[float]] = None
     if create_embedding:
         try:
@@ -351,9 +459,7 @@ def get_similar_solutions(
                 "[Bedrock] Embedding generation failed — falling back to TIER 3: %s", exc
             )
 
-    # Step 3: candidate fetch (tiered) ────────────────────────────────────────
-    # Project isolation: TIER 1 and TIER 2 require project_name.
-    # TIER 3 runs without it for backward compatibility but logs a warning.
+    # ── TIER 1 / TIER 2: embedding-based retrieval ────────────────────────────
     candidates: List[Dict[str, Any]] = []
 
     if query_vec and project_name:
@@ -370,20 +476,19 @@ def get_similar_solutions(
             "Falling through to TIER 3."
         )
 
+    # ── TIER 3: group-key SQL fallback ────────────────────────────────────────
     if not candidates:
-        if not project_name:
-            logger.warning(
-                "[Recommendations] TIER 3 running without project isolation — hash=%r",
-                error_hash
-            )
-        else:
-            logger.info("[Recommendation] Semantic tiers empty — using TIER 3 (hash fallback)")
-        candidates = _tier3_hash_fallback(error_hash, project_name)
+        logger.info("[Recommendation] Semantic tiers empty — using TIER 3 (group-key fallback)")
+        candidates = _tier3_group_key_fallback(
+            error_text,
+            project_name,
+            occurrence_hash=error_hash,
+        )
 
     if not candidates:
         return []
 
-    # Step 4: rank ─────────────────────────────────────────────────────────────
+    # ── Step 4: rank ───────────────────────────────────────────────────────────
     if query_vec and cosine_similarity:
         try:
             ranked = _rank_candidates(query_vec, candidates, limit, cosine_similarity)
@@ -401,25 +506,41 @@ def get_similar_solutions(
 def get_ai_recommendations(
     error_hash: str,
     project_name: Optional[str] = None,
+    error_message: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Return { recommendation: str|None, solutions: [...] }.
 
+    error_message is now the primary lookup key.  error_hash is kept for
+    backward compatibility and to resolve the error text when needed.
     Payload shape is unchanged — frontend requires no update.
     """
     try:
-        solutions = get_similar_solutions(error_hash, project_name, limit=10)
+        solutions = get_similar_solutions(
+            error_hash,
+            project_name,
+            limit=10,
+            error_message=error_message,
+        )
         if not solutions:
             return {"recommendation": None, "solutions": []}
 
-        error_rows = query(
-            f"SELECT error AS error_message, error_detail "
-            f"FROM {TABLE} "
-            f"WHERE row_type = 'log' AND error_hash = %s "
-            f"LIMIT 1",
-            (error_hash,),
-        )
-        prompt = (error_rows[0].get("error_message") if error_rows else "") or ""
-        detail = (error_rows[0].get("error_detail") if error_rows else "") or ""
+        # Use the supplied error_message text directly when available;
+        # fall back to a DB lookup by hash only when necessary.
+        prompt = ""
+        detail = ""
+        if error_message and error_message.strip():
+            prompt = error_message.strip()
+        else:
+            error_rows = query(
+                f"SELECT error AS error_message, error_detail "
+                f"FROM {TABLE} "
+                f"WHERE row_type = 'log' AND error_hash = %s "
+                f"LIMIT 1",
+                (error_hash,),
+            )
+            prompt = (error_rows[0].get("error_message") if error_rows else "") or ""
+            detail = (error_rows[0].get("error_detail") if error_rows else "") or ""
+
         if detail:
             prompt = f"{prompt}\n\nDetails:\n{detail}".strip()
 
@@ -428,7 +549,9 @@ def get_ai_recommendations(
             recommendation = generate_suggested_solution(prompt, solutions[:5])
         else:
             recommendation = None
-            logger.warning("[Recommendations] LLM unavailable — returning solutions without recommendation")
+            logger.warning(
+                "[Recommendations] LLM unavailable — returning solutions without recommendation"
+            )
 
         return {"recommendation": recommendation, "solutions": solutions}
 

@@ -28,5 +28,18 @@ export function ErrorDetail() {
     );
   }
 
-  return <ErrorDetailModal row={location.state as import('../components/ErrorDetailModal').ErrorRow | undefined} errorHash={errorHash} projectName={projectName} onClose={() => navigate('/breaks')} />;
+  // After a resolve or reopen the BreaksList state is stale — navigate back
+  // with a replace so the list re-mounts and re-fetches from the server.
+  function handleClose() { navigate('/breaks', { replace: true }); }
+  function handleRefresh() { /* navigation on close already causes a re-mount */ }
+
+  return (
+    <ErrorDetailModal
+      row={location.state as import('../components/ErrorDetailModal').ErrorRow | undefined}
+      errorHash={errorHash}
+      projectName={projectName}
+      onClose={handleClose}
+      onRefresh={handleRefresh}
+    />
+  );
 }

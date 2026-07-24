@@ -1,7 +1,21 @@
 """Knowledge base helpers — solution versioning, metrics, and Bedrock embeddings.
 
-Architecture
+Grouping key
 ────────────
+Solutions are grouped by a  group_key  that is resolved in this order:
+
+  1. AI semantic match  — find_matching_solution_group() asks Nova Lite whether
+     the incoming error belongs to any existing solution group in this project,
+     matching by root cause regardless of wording differences.
+  2. Normalized text    — derive_solution_group_key(error_message), the MD5 of
+     normalize_error_for_lookup(error_message).  Catches identical errors after
+     stripping timestamps, paths, IDs etc.
+  3. Legacy hash        — occurrence-specific error_hash used as a last resort
+     so callers that haven't been updated yet continue to work.
+
+The group_key is stored in the solution row's existing  error_hash  column.
+No schema change is required.
+
 Duplicate detection order (cheapest first):
   1. Exact-text normalization  — pure Python + one SQL query, zero Bedrock cost
   2. Semantic similarity        — Bedrock embedding + Pinecone query
@@ -13,11 +27,6 @@ Atomic operations
   Version assignment uses COALESCE(MAX(version),0)+1 with a retry loop
   (MAX_VERSION_RETRIES) to handle serialization conflicts from Aurora DSQL's
   optimistic concurrency.
-
-Storage
-  No knowledge_id column.  Duplicate detection redirects to the existing row
-  so no fragmentation occurs when working correctly.  Metrics (usage_count,
-  confidence_score) are per-row — no separate aggregation table needed.
 """
 
 from __future__ import annotations
@@ -28,7 +37,11 @@ import re
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
-from ai.error_matching import build_error_hash_candidates, normalize_project_name
+from ai.error_matching import (
+    build_error_hash_candidates,
+    derive_solution_group_key,
+    normalize_project_name,
+)
 from ai.pinecone_service import delete_vector, query_similar, upsert_vector
 from db import execute, execute_returning, query
 
@@ -80,70 +93,60 @@ def _normalize_solution_text(value: Optional[str]) -> str:
     return re.sub(r"\s+", " ", (value or "").strip()).lower()
 
 
+# ── Group-key helpers ─────────────────────────────────────────────────────────
+
+def _group_key_conditions(
+    group_key: str,
+    project_name: Optional[str],
+) -> Tuple[List[str], List[Any]]:
+    """Return (conditions, params) that filter solution rows to a single group.
+
+    The group key is stored in the error_hash column of solution rows.
+    A project filter is always applied when project_name is supplied.
+    """
+    conditions: List[str] = ["row_type = 'solution'", "error_hash = %s"]
+    params: List[Any] = [group_key]
+    if project_name:
+        conditions.append("LOWER(project_name) = LOWER(%s)")
+        params.append(project_name)
+    return conditions, params
+
+
 # ── Tier 1: Exact-text duplicate search (no Bedrock call) ────────────────────
 
 def _find_duplicate_solution(
-    log_ref_id: str,
+    group_key: str,
     solution_text: str,
     project_name: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Exact-text duplicate search — zero Bedrock cost.
+    """Exact-text duplicate search within the solution group — zero Bedrock cost.
 
-    Pass 1: same log_ref_id (same error occurrence, fastest path).
-    Pass 2: project-wide scan across all log_ref_id values — only when
-            project_name is provided, to catch identical text saved under a
-            different error hash without crossing project boundaries.
+    Scans all solution rows that share the same group_key (project + normalized
+    error message) and returns one whose normalized text matches solution_text.
     """
     normalized = _normalize_solution_text(solution_text)
     if not normalized:
         return None
 
-    # Pass 1 ──────────────────────────────────────────────────────────────────
+    conditions, params = _group_key_conditions(group_key, project_name)
     try:
-        same_log_rows = query(
+        rows = query(
             f"SELECT id, usage_count, confidence_score, version, solution, "
             f"created_by, created_at "
             f"FROM {TABLE} "
-            f"WHERE row_type = 'solution' AND log_ref_id = %s "
-            f"ORDER BY created_at DESC",
-            (log_ref_id,),
+            f"WHERE {' AND '.join(conditions)} "
+            f"ORDER BY confidence_score DESC, usage_count DESC, created_at DESC",
+            tuple(params),
         )
-        for row in same_log_rows:
-            if _normalize_solution_text(row.get("solution")) == normalized:
-                return row
-    except Exception as exc:
-        logger.exception(
-            "[KnowledgeBase] Exact duplicate pass-1 query failed: %s", exc
-        )
-        return None
-
-    # Pass 2: project-wide cross-hash scan ────────────────────────────────────
-    if not project_name:
-        return None
-
-    try:
-        project_rows = query(
-            f"SELECT id, usage_count, confidence_score, version, solution, "
-            f"created_by, created_at "
-            f"FROM {TABLE} "
-            f"WHERE row_type = 'solution' "
-            f"AND LOWER(project_name) = LOWER(%s) "
-            f"AND log_ref_id != %s "
-            f"ORDER BY confidence_score DESC, usage_count DESC, created_at DESC "
-            f"LIMIT 500",
-            (project_name, log_ref_id),
-        )
-        for row in project_rows:
+        for row in rows:
             if _normalize_solution_text(row.get("solution")) == normalized:
                 logger.info(
-                    "[KnowledgeBase] Cross-hash exact duplicate found — "
-                    "solution_id=%s project=%r", row.get("id"), project_name
+                    "[KnowledgeBase] Exact duplicate found in group — solution_id=%s",
+                    row.get("id"),
                 )
                 return row
     except Exception as exc:
-        logger.exception(
-            "[KnowledgeBase] Exact duplicate pass-2 query failed: %s", exc
-        )
+        logger.exception("[KnowledgeBase] Exact duplicate query failed: %s", exc)
 
     return None
 
@@ -152,20 +155,20 @@ def _find_duplicate_solution(
 
 def detect_duplicate_solution(
     solution_text: str,
-    error_hash: str,
+    group_key: str,
     project_name: Optional[str] = None,
     limit: int = 5,
 ) -> Dict[str, Any]:
     """Project-scoped semantic duplicate detection.
 
     Only called after exact-text (Tier 1) found nothing.
-    Pinecone is queried with project_name filter only (no error_hash) so
-    semantically equivalent solutions under different hashes are caught.
+    Pinecone is queried with project_name filter only (no error_hash/group_key)
+    so semantically equivalent solutions are caught across the whole project.
 
     Thresholds:
-      >= 0.95         → duplicate, no LLM needed
-      0.90 – 0.95     → warn, ask Nova Lite for confirmation
-      < 0.90          → new
+      >= 0.95  → duplicate, no LLM needed
+      0.90–0.95 → warn, ask Nova Lite for confirmation
+      < 0.90   → new
 
     Fails open: any exception returns is_duplicate=False so saves are never
     silently blocked.
@@ -290,22 +293,43 @@ def _get_solution_metadata(solution_id: Optional[str]) -> Optional[Dict[str, Any
     }
 
 
-def _get_log_row(error_hash: str, project_name: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    """Find the log row matching an error_hash."""
-    conditions = ["row_type = 'log'"]
+def _get_log_row(
+    error_message: str,
+    project_name: Optional[str] = None,
+    occurrence_error_hash: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Find a representative log row by error message text (primary) or hash (fallback).
+
+    We select the most recent log row for this project+error so we can read the
+    canonical project_name casing.  The specific log row ID is no longer used
+    for solution grouping — only project_name and the group_key matter.
+    """
+    conditions = ["row_type = 'log'", "error IS NOT NULL"]
     params: List[Any] = []
-    hash_candidates = build_error_hash_candidates(error_hash, None)
-    if hash_candidates:
-        conditions.append(f"({' OR '.join(['error_hash = %s'] * len(hash_candidates))})")
-        params.extend(hash_candidates)
-    else:
-        conditions.append("(error_hash = %s OR MD5(LOWER(TRIM(error))) = %s)")
-        params.extend([error_hash, error_hash])
+
     if project_name:
         conditions.insert(0, "LOWER(project_name) = LOWER(%s)")
         params.insert(0, project_name)
+
+    # Primary: match by normalised error text
+    if error_message:
+        conditions.append(
+            "(LOWER(TRIM(error)) = LOWER(TRIM(%s)) "
+            " OR MD5(LOWER(TRIM(error))) = MD5(LOWER(TRIM(%s))))"
+        )
+        params.extend([error_message, error_message])
+    elif occurrence_error_hash:
+        # Fallback: match by the occurrence-specific hash when text is unavailable
+        hash_candidates = build_error_hash_candidates(occurrence_error_hash, None)
+        if hash_candidates:
+            conditions.append(f"({' OR '.join(['error_hash = %s'] * len(hash_candidates))})")
+            params.extend(hash_candidates)
+        else:
+            conditions.append("error_hash = %s")
+            params.append(occurrence_error_hash)
+
     rows = query(
-        f"SELECT id, project_name, error_hash FROM {TABLE} "
+        f"SELECT id, project_name, error, error_hash FROM {TABLE} "
         f"WHERE {' AND '.join(conditions)} ORDER BY timestamp DESC LIMIT 1",
         tuple(params),
     )
@@ -330,8 +354,12 @@ def insert_solution(
     base_solution_id: Optional[str] = None,
     force_create: bool = False,
     check_only: bool = False,
+    error_message: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Insert a new solution or return an existing duplicate.
+
+    The solution group is identified by  project_name + normalize_error_for_lookup(error_message).
+    error_hash is used only as a fallback when error_message is not supplied.
 
     Duplicate detection order (cheapest first):
       1. Exact-text match  — no Bedrock call, no Pinecone call
@@ -340,22 +368,65 @@ def insert_solution(
 
     check_only=True: run duplicate detection and return the result without
       inserting.  If a duplicate is found, return it.  If no duplicate, return
-      {"duplicate": False} so the caller knows a new row would be created.
-      The frontend sends check_only=True first to surface the duplicate dialog
-      before committing; it then sends check_only=False to actually save.
+      {"duplicate": False}.
 
-    force_create=True: bypass all duplicate checks (intentional user override
-      e.g. "Create Anyway" in the duplicate dialog).
+    force_create=True: bypass all duplicate checks (intentional user override).
     """
-    log_row = _get_log_row(error_hash, project_name)
+    # Resolve the log row so we can read canonical project_name
+    log_row = _get_log_row(
+        error_message or "",
+        project_name,
+        occurrence_error_hash=error_hash,
+    )
     if not log_row:
         raise ValueError("No matching log row found")
 
-    log_ref_id = log_row["id"]
+    canonical_project = log_row.get("project_name") or project_name or ""
+
+    # ── Resolve the group key (first match wins) ──────────────────────────────
+    # Priority:
+    #   1. AI semantic match — finds the correct group even when wording differs
+    #   2. Normalized text   — exact same error after normalization
+    #   3. Legacy hash       — occurrence hash as last resort
+    raw_error_text = error_message or log_row.get("error") or ""
+    group_key: Optional[str] = None
+
+    # Step 1: AI semantic match
+    if raw_error_text and canonical_project:
+        try:
+            from ai.semantic_group_matcher import find_matching_solution_group
+            ai_key = find_matching_solution_group(raw_error_text, canonical_project)
+            if ai_key:
+                group_key = ai_key
+                logger.info(
+                    "[KnowledgeBase] insert_solution group resolved via AI match: "
+                    "group_key=%r project=%r", group_key, canonical_project,
+                )
+        except Exception as exc:
+            logger.exception(
+                "[KnowledgeBase] insert_solution AI match failed — falling back: %s", exc
+            )
+
+    # Step 2: normalized text key
+    if not group_key and raw_error_text:
+        group_key = derive_solution_group_key(raw_error_text)
+
+    # Step 3: occurrence hash fallback
+    if not group_key:
+        group_key = error_hash
+        logger.warning(
+            "[KnowledgeBase] Could not derive group_key from error text — "
+            "falling back to occurrence hash=%r", error_hash
+        )
+
+    logger.info(
+        "[KnowledgeBase] insert_solution group_key=%r project=%r",
+        group_key, canonical_project,
+    )
 
     if not force_create:
         # Tier 1: exact-text (zero Bedrock cost) ─────────────────────────────
-        exact_duplicate = _find_duplicate_solution(log_ref_id, solution, project_name)
+        exact_duplicate = _find_duplicate_solution(group_key, solution, canonical_project)
         if exact_duplicate:
             payload = {
                 "duplicate":        True,
@@ -370,14 +441,11 @@ def insert_solution(
                 "confidence_score": exact_duplicate.get("confidence_score"),
                 "usage_count":      exact_duplicate.get("usage_count"),
             }
-            logger.info(
-                "[Duplicate] Exact duplicate found — solution_id=%s",
-                exact_duplicate.get("id"),
-            )
+            logger.info("[Duplicate] Exact duplicate found — solution_id=%s", exact_duplicate.get("id"))
             return payload
 
         # Tier 2: semantic (Bedrock + Pinecone) ───────────────────────────────
-        duplicate_check = detect_duplicate_solution(solution, error_hash, project_name)
+        duplicate_check = detect_duplicate_solution(solution, group_key, canonical_project)
         if duplicate_check.get("duplicate_prompt"):
             es = duplicate_check.get("existing_solution") or {}
             payload = {
@@ -412,10 +480,13 @@ def insert_solution(
     last_exc: Optional[Exception] = None
     for attempt in range(MAX_VERSION_RETRIES):
         try:
+            # Version is scoped to the group_key, not to a single log_ref_id.
+            # This ensures v1, v2, v3... are contiguous across all occurrences.
             version_rows = query(
                 f"SELECT COALESCE(MAX(version), 0) AS max_version FROM {TABLE} "
-                f"WHERE row_type = 'solution' AND log_ref_id = %s",
-                (log_ref_id,),
+                f"WHERE row_type = 'solution' AND error_hash = %s "
+                f"AND LOWER(project_name) = LOWER(%s)",
+                (group_key, canonical_project),
             )
             version = int((version_rows[0]["max_version"] or 0)) + 1
 
@@ -427,9 +498,9 @@ def insert_solution(
                 f"RETURNING *",
                 (
                     str(uuid.uuid4()),
-                    log_row["project_name"],
-                    error_hash,
-                    log_ref_id,
+                    canonical_project,
+                    group_key,          # ← group key, NOT occurrence hash
+                    log_row["id"],      # log_ref_id kept for traceability only
                     solution,
                     created_by,
                     usage_count,
@@ -441,17 +512,17 @@ def insert_solution(
             if row:
                 row["duplicate"] = False
                 logger.info(
-                    "[Solution] New version created — solution_id=%s version=%d project=%r",
-                    row.get("id"), version,
-                    row.get("project_name") or log_row.get("project_name"),
+                    "[Solution] New version created — solution_id=%s version=%d "
+                    "group_key=%r project=%r",
+                    row.get("id"), version, group_key, canonical_project,
                 )
                 if embedding is not None:
                     try:
                         upsert_vector(
                             row["id"],
                             json.loads(embedding),
-                            row.get("project_name") or log_row.get("project_name") or "",
-                            error_hash,
+                            canonical_project,
+                            group_key,
                             version,
                         )
                     except Exception as exc:
@@ -481,8 +552,7 @@ def insert_solution(
 def increment_usage(solution_id: str) -> Dict[str, Any]:
     """Atomically increment usage_count and recompute confidence_score.
 
-    Single UPDATE SET usage_count = usage_count + 1 eliminates the
-    read-then-write race condition present in the original implementation.
+    Single UPDATE eliminates the read-then-write race condition.
     """
     incremented = execute_returning(
         f"UPDATE {TABLE} "
@@ -522,31 +592,59 @@ def delete_solution_version(solution_id: str) -> int:
 
 
 def get_top_solutions(
-    error_hash: str,
+    error_message: str,
     project_name: Optional[str] = None,
     limit: int = 5,
     offset: int = 0,
+    # Legacy param accepted but ignored — kept for call-site compatibility
+    error_hash: Optional[str] = None,
 ) -> Tuple[List[Dict[str, Any]], int]:
-    conditions = ["row_type = 'solution'"]
-    params: List[Any] = []
-    hash_candidates = build_error_hash_candidates(error_hash, None)
-    if hash_candidates:
-        conditions.append(f"({' OR '.join(['error_hash = %s'] * len(hash_candidates))})")
-        params.extend(hash_candidates)
-    else:
-        conditions.append(
-            f"(error_hash = %s OR error_hash IN ("
-            f"  SELECT error_hash FROM {TABLE} WHERE row_type = 'log' "
-            f"  AND MD5(LOWER(TRIM(error))) = %s))"
-        )
-        params.extend([error_hash, error_hash])
-    if project_name:
-        normalized_project = normalize_project_name(project_name)
-        if normalized_project:
-            conditions.append("LOWER(project_name) = LOWER(%s)")
-            params.append(project_name)
+    """Return paginated solutions for a project + error message group.
 
+    Group key resolution order (first match wins):
+      1. AI semantic match — find_matching_solution_group() asks Nova Lite to
+         identify the correct group by meaning, not exact wording.
+      2. Normalized text key — derive_solution_group_key(error_message).
+      3. Legacy fallback — error_hash treated as the group key directly.
+
+    All occurrences that resolve to the same group_key see identical results.
+    """
+    group_key: Optional[str] = None
+
+    # ── Step 1: AI semantic match ─────────────────────────────────────────────
+    if error_message and error_message.strip() and project_name:
+        try:
+            from ai.semantic_group_matcher import find_matching_solution_group
+            ai_key = find_matching_solution_group(error_message.strip(), project_name)
+            if ai_key:
+                group_key = ai_key
+                logger.info(
+                    "[KnowledgeBase] get_top_solutions resolved via AI match: "
+                    "group_key=%r project=%r", group_key, project_name,
+                )
+        except Exception as exc:
+            logger.exception(
+                "[KnowledgeBase] get_top_solutions AI match failed — falling back: %s", exc
+            )
+
+    # ── Step 2: normalized text key ───────────────────────────────────────────
+    if not group_key and error_message and error_message.strip():
+        group_key = derive_solution_group_key(error_message)
+
+    # ── Step 3: legacy hash fallback ──────────────────────────────────────────
+    if not group_key and error_hash:
+        group_key = error_hash
+        logger.warning(
+            "[KnowledgeBase] get_top_solutions: no error_message supplied, "
+            "falling back to error_hash=%r", error_hash
+        )
+
+    if not group_key:
+        return [], 0
+
+    conditions, params = _group_key_conditions(group_key, project_name)
     where = " AND ".join(conditions)
+
     rows = query(
         f"SELECT id, solution, created_by, created_at, usage_count, "
         f"confidence_score, version, log_ref_id "
@@ -560,18 +658,37 @@ def get_top_solutions(
         tuple(params),
     )
     total = int(total_rows[0]["total"]) if total_rows else 0
+
+    logger.info(
+        "[KnowledgeBase] get_top_solutions group_key=%r project=%r total=%d",
+        group_key, project_name, total,
+    )
     return rows, total
 
 
 def get_solution_versions(solution_id: str) -> List[Dict[str, Any]]:
+    """Return all versions in the same solution group as solution_id.
+
+    Versions are grouped by group_key (error_hash on the solution row) +
+    project_name, which covers all occurrences of the same error.
+    """
     row = _find_solution(solution_id)
     if not row:
         return []
+
+    # The group key is stored in the solution row's error_hash column
+    group_key    = row.get("error_hash")
+    project_name = row.get("project_name")
+
+    if not group_key:
+        return []
+
+    conditions, params = _group_key_conditions(group_key, project_name)
     return query(
         f"SELECT id, solution, created_by, created_at, usage_count, confidence_score, version "
-        f"FROM {TABLE} WHERE row_type = 'solution' AND log_ref_id = %s "
+        f"FROM {TABLE} WHERE {' AND '.join(conditions)} "
         f"ORDER BY version DESC",
-        (row["log_ref_id"],),
+        tuple(params),
     )
 
 
