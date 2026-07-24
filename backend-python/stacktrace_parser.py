@@ -65,6 +65,12 @@ def parse_python_traceback(traceback_text: str) -> List[StackFrame]:
           File "/app/parser.py", line 15, in parse_json
             return json.loads(text)
         ValueError: Invalid JSON
+    
+    Also handles inline syntax errors:
+        File "main.py", line 10
+            if x == 5
+                     ^
+        SyntaxError: invalid syntax
     """
     frames = []
     
@@ -90,16 +96,24 @@ def parse_python_traceback(traceback_text: str) -> List[StackFrame]:
             # Next line often contains the actual code
             code_line = None
             if i + 1 < len(lines):
-                next_line = lines[i + 1].strip()
-                # Code lines are typically indented and not file references
-                if next_line and not next_line.startswith('File '):
-                    code_line = next_line
+                next_line = lines[i + 1]
+                stripped = next_line.strip()
+                # Code lines are typically indented and not file references or error types
+                if stripped and not stripped.startswith('File ') and not re.match(r'^[A-Z]\w+Error:', stripped):
+                    code_line = stripped
+                    
+            # Check if line after next has a caret (^) pointing to error location
+            column = None
+            if i + 2 < len(lines) and '^' in lines[i + 2]:
+                caret_line = lines[i + 2]
+                column = caret_line.index('^') if '^' in caret_line else None
             
             frames.append(StackFrame(
                 file_path=file_path,
                 line_number=line_number,
                 function_name=function_name,
                 code_line=code_line,
+                column=column,
             ))
         
         i += 1
@@ -189,34 +203,67 @@ def parse_generic_error(error_text: str) -> List[StackFrame]:
         "Error in /app/main.js:42"
     """
     frames = []
+    lines = error_text.split('\n')
     
     # Pattern: (file, line N) or file:line or "line N"
     patterns = [
         # (<path>, line N)
         re.compile(r'\(([^,)]+),\s+line\s+(\d+)\)'),
-        # file.ext:line
-        re.compile(r'([a-zA-Z0-9_./\\-]+\.[a-zA-Z]{1,5}):(\d+)'),
+        # file.ext:line:col
+        re.compile(r'([a-zA-Z0-9_./\\-]+\.[a-zA-Z]{1,5}):(\d+)(?::(\d+))?'),
         # "at line N" or "line N" (extract line only)
         re.compile(r'(?:at\s+)?line\s+(\d+)', re.IGNORECASE),
     ]
     
-    for pattern in patterns:
-        matches = pattern.finditer(error_text)
-        for match in matches:
-            if len(match.groups()) >= 2:
-                file_path = match.group(1)
-                line_number = int(match.group(2))
-                frames.append(StackFrame(
-                    file_path=file_path,
-                    line_number=line_number,
-                ))
-            elif len(match.groups()) == 1:
-                # Line number only
-                line_number = int(match.group(1))
-                frames.append(StackFrame(
-                    file_path="<unknown>",
-                    line_number=line_number,
-                ))
+    for idx, line in enumerate(lines):
+        for pattern in patterns:
+            match = pattern.search(line)
+            if match:
+                groups = match.groups()
+                
+                if len(groups) >= 2 and groups[0] and groups[1]:
+                    file_path = groups[0]
+                    line_number = int(groups[1])
+                    column = int(groups[2]) if len(groups) > 2 and groups[2] else None
+                    
+                    # Try to find code line in surrounding lines
+                    code_line = None
+                    
+                    # Check if next line looks like code (indented, has code-like characters)
+                    if idx + 1 < len(lines):
+                        next_line = lines[idx + 1].strip()
+                        if next_line and not re.match(r'^(File|at|Traceback)', next_line):
+                            code_line = next_line
+                    
+                    # Also check if line before the error has a code snippet marker (^)
+                    if idx + 2 < len(lines) and lines[idx + 2].strip().startswith('^'):
+                        # The line before the ^ is the code
+                        if idx + 1 < len(lines):
+                            code_line = lines[idx + 1].strip()
+                    
+                    frames.append(StackFrame(
+                        file_path=file_path,
+                        line_number=line_number,
+                        code_line=code_line,
+                        column=column,
+                    ))
+                    break
+                elif len(groups) == 1 and groups[0]:
+                    # Line number only
+                    line_number = int(groups[0])
+                    # Try to extract code from context
+                    code_line = None
+                    if idx + 1 < len(lines):
+                        next_line = lines[idx + 1].strip()
+                        if next_line and not re.match(r'^(File|at|Traceback|Error)', next_line):
+                            code_line = next_line
+                    
+                    frames.append(StackFrame(
+                        file_path="<unknown>",
+                        line_number=line_number,
+                        code_line=code_line,
+                    ))
+                    break
     
     return frames
 

@@ -41,10 +41,20 @@ interface KbSolution {
   log_ref_id?: string | null;
 }
 
+interface SimilarSolution {
+  id: string | null;
+  solution: string | null;
+  created_by: string | null;
+  created_at: string | null;
+  confidence_score: number | null;
+  usage_count: number | null;
+  version: number | null;
+}
+
 interface AiRecommendation {
   recommendation: string | null;
   solutions: KbSolution[];
-  solutions: SimilarSolution[];
+  similar_solutions?: SimilarSolution[];
 }
 
 interface StackFrame {
@@ -61,16 +71,15 @@ interface ParsedStackTrace {
 }
 
 interface DuplicatePromptState {
-  mode: 'save' | 'improve';
-  decision?: string | null;
-  similarity?: number | null;
-  solution_id?: string | null;
-  solution?: string | null;
-  created_by?: string | null;
-  created_at?: string | null;
-  version?: number | null;
-  confidence_score?: number | null;
-  usage_count?: number | null;
+  solution_id: string;
+  solution: string;
+  decision: string | null;
+  similarity: number | null;
+  version: number | null;
+  confidence_score: number | null;
+  usage_count: number | null;
+  created_by: string | null;
+  created_at: string | null;
 }
 
 interface ErrorDetailData {
@@ -90,18 +99,6 @@ interface ErrorDetailData {
   occurrences: Occurrence[];
   solution: SolutionData | null;
   ai_recommendation?: AiRecommendation | null;
-}
-
-interface DuplicatePromptState {
-  solution_id: string;
-  solution: string;
-  decision: string | null;
-  similarity: number | null;
-  version: number | null;
-  confidence_score: number | null;
-  usage_count: number | null;
-  created_by: string | null;
-  created_at: string | null;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -152,6 +149,21 @@ const sectionLabel: CSSProperties = {
 function ConfidenceBar({ score }: { score: number }) {
   const pct = Math.min(100, Math.max(0, score));
   const color = pct >= 80 ? '#34d399' : pct >= 50 ? '#fbbf24' : '#f87171';
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+      <span style={{
+        display: 'inline-block', width: 60, height: 5, borderRadius: 3,
+        background: 'rgba(255,255,255,0.1)', overflow: 'hidden',
+      }}>
+        <span style={{ display: 'block', width: `${pct}%`, height: '100%', background: color, borderRadius: 3 }} />
+      </span>
+      <span style={{ color, fontWeight: 600 }}>{pct.toFixed(0)}%</span>
+    </span>
+  );
+}
+
+// ── Parsed Stack Trace ────────────────────────────────────────────────────────
+
 function ParsedStackTraceView({ parsedTrace }: { parsedTrace: ParsedStackTrace }) {
   if (!parsedTrace.frames || parsedTrace.frames.length === 0) {
     // Fall back to raw trace if no frames parsed
@@ -257,10 +269,15 @@ function ParsedStackTraceView({ parsedTrace }: { parsedTrace: ParsedStackTrace }
             </div>
           )}
 
-          {/* If no code line, show a placeholder */}
+          {/* If no code line, show a helpful message */}
           {!frame.code_line && (
-            <div style={{ padding: '12px 14px', fontSize: 11, color: 'rgba(252,165,165,0.4)', fontStyle: 'italic' }}>
-              Source code not available
+            <div style={{ padding: '12px 14px', fontSize: 11, color: 'rgba(252,165,165,0.5)' }}>
+              <span style={{ fontStyle: 'italic' }}>Source code not available</span>
+              {frame.file_path === '<unknown>' && (
+                <span style={{ marginLeft: 8, color: 'rgba(252,165,165,0.4)' }}>
+                  (Error occurred in dynamically evaluated code)
+                </span>
+              )}
             </div>
           )}
         </div>
@@ -277,14 +294,11 @@ function StatusBadge({ status }: { status: string }) {
   };
   const s = styles[status] ?? styles.new;
   return (
-    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-      <span style={{
-        display: 'inline-block', width: 60, height: 5, borderRadius: 3,
-        background: 'rgba(255,255,255,0.1)', overflow: 'hidden',
-      }}>
-        <span style={{ display: 'block', width: `${pct}%`, height: '100%', background: color, borderRadius: 3 }} />
-      </span>
-      <span style={{ color, fontWeight: 600 }}>{pct.toFixed(0)}%</span>
+    <span style={{
+      display: 'inline-block', padding: '4px 10px', borderRadius: 5,
+      background: s.bg, color: s.color, fontSize: 11, fontWeight: 600,
+    }}>
+      {s.label}
     </span>
   );
 }
@@ -322,47 +336,47 @@ export function ErrorDetailModal({
   const isModal = !!row;
 
   // ── Remote data ──────────────────────────────────────────────────────────
-  const [data, setData]       = useState<ErrorDetailData | null>(null);
+  const [data, setData] = useState<ErrorDetailData | null>(null);
   const [loading, setLoading] = useState(!!effectiveErrorHash);
   const [notFound, setNotFound] = useState(false);
 
   // ── Paginated KB solutions ───────────────────────────────────────────────
-  const [kbSolutions, setKbSolutions]     = useState<KbSolution[]>([]);
-  const [kbTotal, setKbTotal]             = useState(0);
-  const [kbOffset, setKbOffset]           = useState(0);
-  const [kbLoading, setKbLoading]         = useState(false);
+  const [kbSolutions, setKbSolutions] = useState<KbSolution[]>([]);
+  const [kbTotal, setKbTotal] = useState(0);
+  const [kbOffset, setKbOffset] = useState(0);
+  const [kbLoading, setKbLoading] = useState(false);
   const KB_PAGE = 5;
 
   // ── Versions panel ───────────────────────────────────────────────────────
-  const [versionsFor, setVersionsFor]       = useState<string | null>(null); // solution id
-  const [versions, setVersions]             = useState<KbSolution[]>([]);
+  const [versionsFor, setVersionsFor] = useState<string | null>(null); // solution id
+  const [versions, setVersions] = useState<KbSolution[]>([]);
   const [loadingVersions, setLoadingVersions] = useState(false);
 
   // ── Editor ───────────────────────────────────────────────────────────────
-  const [editorText, setEditorText]         = useState('');
-  const [editorSaving, setEditorSaving]     = useState(false);
-  const [editorError, setEditorError]       = useState('');
+  const [editorText, setEditorText] = useState('');
+  const [editorSaving, setEditorSaving] = useState(false);
+  const [editorError, setEditorError] = useState('');
   const [duplicatePrompt, setDuplicatePrompt] = useState<DuplicatePromptState | null>(null);
 
   // ── Action state ─────────────────────────────────────────────────────────
-  const [actionBusy, setActionBusy]         = useState(false);
-  const [actionError, setActionError]       = useState('');
+  const [actionBusy, setActionBusy] = useState(false);
+  const [actionError, setActionError] = useState('');
 
   // ── Derived ──────────────────────────────────────────────────────────────
-  const projectName  = data?.project_name ?? row?.project ?? projectNameProp ?? '';
+  const projectName = data?.project_name ?? row?.project ?? projectNameProp ?? '';
   const errorMessage = data?.error_message ?? row?.error ?? '';
-  const errorStatus  = data?.error_status ?? null;
+  const errorStatus = data?.error_status ?? null;
 
-  const isResolved  = errorStatus === 'resolved';
-  const isReopened  = errorStatus === 'reopened';
-  const isOpen      = !isResolved && !isReopened;
+  const isResolved = errorStatus === 'resolved';
+  const isReopened = errorStatus === 'reopened';
+  const isOpen = !isResolved && !isReopened;
 
   // Active solution from backend (used in resolved view)
   const activeSolution = data?.solution ?? null;
 
   // AI recommendation text + solutions (dedup against active solution)
-  const aiRec     = data?.ai_recommendation ?? null;
-  const aiText    = aiRec?.recommendation ?? null;
+  const aiRec = data?.ai_recommendation ?? null;
+  const aiText = aiRec?.recommendation ?? null;
   const aiSolutions = (aiRec?.solutions ?? [])
     .filter(s => s?.solution)
     .filter(s => !activeSolution?.id || s.id !== activeSolution.id)
@@ -451,14 +465,14 @@ export function ErrorDetailModal({
         ...prev,
         error_status: 'resolved',
         solution: {
-          id:               j.solution_id,
-          solution:         j.solution,
-          created_at:       j.created_at,
-          created_by:       j.created_by,
-          version:          j.version,
+          id: j.solution_id,
+          solution: j.solution,
+          created_at: j.created_at,
+          created_by: j.created_by,
+          version: j.version,
           confidence_score: j.confidence_score,
-          usage_count:      j.usage_count,
-          updated_at:       null,
+          usage_count: j.usage_count,
+          updated_at: null,
         },
       } : prev);
     } catch (e) {
@@ -537,15 +551,15 @@ export function ErrorDetailModal({
       const preview = await previewRes.json();
       if (preview?.duplicate_prompt && !forceCreate) {
         setDuplicatePrompt({
-          solution_id:      preview.solution_id,
-          solution:         preview.solution,
-          decision:         preview.decision,
-          similarity:       preview.similarity,
-          version:          preview.version,
+          solution_id: preview.solution_id,
+          solution: preview.solution,
+          decision: preview.decision,
+          similarity: preview.similarity,
+          version: preview.version,
           confidence_score: preview.confidence_score,
-          usage_count:      preview.usage_count,
-          created_by:       preview.created_by,
-          created_at:       preview.created_at,
+          usage_count: preview.usage_count,
+          created_by: preview.created_by,
+          created_at: preview.created_at,
         });
         return;
       }
@@ -706,7 +720,7 @@ export function ErrorDetailModal({
             No solution record found for this resolution.
             {data?.parsed_stacktrace && data.parsed_stacktrace.frames && data.parsed_stacktrace.frames.length > 0 ? (
               <ParsedStackTraceView parsedTrace={data.parsed_stacktrace} />
-            ) : (
+            ) : data?.error_detail ? (
               <pre style={{
                 margin: 0, fontFamily: 'ui-monospace, monospace', fontSize: 12,
                 lineHeight: 1.8, color: '#fca5a5',
@@ -715,9 +729,9 @@ export function ErrorDetailModal({
                 whiteSpace: 'pre-wrap', wordBreak: 'break-word',
                 minHeight: 140,
               }}>
-                {errorDetail}
+                {data.error_detail}
               </pre>
-            )}
+            ) : null}
           </div>
         )}
 
@@ -787,7 +801,7 @@ export function ErrorDetailModal({
                 showImprove: true,
                 showDelete: true,
               })
-            )}
+              )}
             {kbLoading && (
               <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: '8px 0' }}>Loading…</div>
             )}
@@ -836,6 +850,27 @@ export function ErrorDetailModal({
             </button>
           </div>
         </div>
+
+        {/* ── 4. Stack Trace ────────────────────────────────────────────── */}
+        {data?.error_detail && (
+          <div>
+            <div style={sectionLabel}>📋 Stack Trace</div>
+            {data?.parsed_stacktrace && data.parsed_stacktrace.frames && data.parsed_stacktrace.frames.length > 0 ? (
+              <ParsedStackTraceView parsedTrace={data.parsed_stacktrace} />
+            ) : (
+              <pre style={{
+                margin: 0, fontFamily: 'ui-monospace, monospace', fontSize: 12,
+                lineHeight: 1.8, color: '#fca5a5',
+                background: 'rgba(239,68,68,0.06)', border: '1px solid rgba(239,68,68,0.15)',
+                borderRadius: 8, padding: '18px 20px',
+                whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+                minHeight: 140,
+              }}>
+                {data.error_detail}
+              </pre>
+            )}
+          </div>
+        )}
 
         {actionError && (
           <div style={{ fontSize: 12, color: '#f87171', padding: '8px 12px', borderRadius: 6, background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)' }}>
