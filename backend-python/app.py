@@ -728,6 +728,60 @@ def _validate_project(project_name):
     return project_name
 
 
+def _smart_extract_error_detail(error_text):
+    """
+    Smart extraction: If error field contains a stack trace, extract it.
+    
+    Returns: (short_error, full_traceback)
+    
+    Handles patterns like:
+    - "KeyError: 'user_id'\nTraceback (most recent call last)..."
+    - "Traceback (most recent call last):\n  File...\nKeyError: 'user_id'"
+    - Just "KeyError: 'user_id'" (no traceback)
+    """
+    if not error_text:
+        return error_text, None
+    
+    # Check for common stack trace patterns
+    traceback_indicators = [
+        "Traceback (most recent call last)",
+        "  File \"",
+        "\n  at ",  # JavaScript
+        "\n    at ",  # JavaScript with spaces
+        "Stack trace:",
+        "Call stack:",
+    ]
+    
+    # If no traceback indicators, return as-is
+    has_traceback = any(indicator in error_text for indicator in traceback_indicators)
+    if not has_traceback:
+        return error_text, None
+    
+    # Split into lines
+    lines = error_text.split('\n')
+    
+    # Try to find where the actual error message is (usually first or last line)
+    # Pattern 1: Error message at the end (Python style)
+    # "Traceback...\n  File...\nKeyError: 'user_id'"
+    if "Traceback" in lines[0]:
+        # Last non-empty line is usually the error
+        error_message = None
+        for line in reversed(lines):
+            if line.strip():
+                error_message = line.strip()
+                break
+        return error_message or error_text, error_text
+    
+    # Pattern 2: Error message at the beginning
+    # "KeyError: 'user_id'\nTraceback..."
+    first_line = lines[0].strip()
+    if first_line and not first_line.startswith(('Traceback', '  File', '  at', 'Stack')):
+        return first_line, error_text
+    
+    # Pattern 3: Can't determine - return full text as both
+    return error_text, error_text
+
+
 @app.route("/api/ingest/error", methods=["POST"])
 def ingest_error():
     body = request.get_json() or {}
@@ -742,11 +796,30 @@ def ingest_error():
 
     actual_name = _validate_project(project_name)
     opt = _parse_optional(body)
-    error_hash = derive_error_hash(error, opt.get("error_detail"))
+    
+    # ── SMART EXTRACTION: Auto-extract stack trace from error field ──────────
+    error_detail = opt.get("error_detail")
+    
+    if not error_detail:
+        # Try to extract stack trace from the error field itself
+        short_error, extracted_trace = _smart_extract_error_detail(error)
+        if extracted_trace:
+            error_detail = extracted_trace
+            error = short_error  # Use the short version for the error field
+            print(f'[Ingest] 🔧 Auto-extracted stack trace from error field for project="{actual_name}"')
+            print(f'[Ingest] ✅ error_detail now populated ({len(error_detail)} chars)')
+        else:
+            print(f'[Ingest] ⚠️  WARNING: No stack trace found in error field for project="{actual_name}"')
+            print(f'[Ingest] ⚠️  Error: "{error[:100]}"')
+            print(f'[Ingest] ⚠️  Stack trace parsing will NOT work without error_detail!')
+    else:
+        print(f'[Ingest] ✅ error_detail received ({len(error_detail)} chars) for project="{actual_name}"')
+    
+    error_hash = derive_error_hash(error, error_detail)
 
     try:
         inserted = _insert_result(
-            actual_name, opt["file_name"], error, opt["error_detail"],
+            actual_name, opt["file_name"], error, error_detail,
             error_hash, "open",
             opt.get("success_count", 0), opt.get("failure_count", 1),
             opt["word_count"], opt["file_type"], opt["input_tokens"],
@@ -772,15 +845,24 @@ def ingest_log():
     error = str(body.get("error", "")).strip()
     is_workflow = error.startswith("{") and ("workflowId" in error or "workflowStatus" in error)
     is_error = bool(error) and not is_workflow
+    
+    # ── SMART EXTRACTION: Auto-extract stack trace from error field ──────────
+    error_detail = opt.get("error_detail")
+    if is_error and not error_detail:
+        short_error, extracted_trace = _smart_extract_error_detail(error)
+        if extracted_trace:
+            error_detail = extracted_trace
+            error = short_error
+            print(f'[Ingest] 🔧 Auto-extracted stack trace from error field for project="{actual_name}"')
 
-    error_hash = derive_error_hash(error, opt.get("error_detail")) if is_error else None
+    error_hash = derive_error_hash(error, error_detail) if is_error else None
     success_count = body.get("success_count", 0 if is_error else 1)
     failure_count = body.get("failure_count", 1 if is_error else 0)
 
     try:
         inserted = _insert_result(
             actual_name, opt["file_name"],
-            error if is_error else None, opt["error_detail"],
+            error if is_error else None, error_detail,
             error_hash, "open" if is_error else None,
             success_count, failure_count,
             opt["word_count"], opt["file_type"], opt["input_tokens"],
@@ -1875,3 +1957,302 @@ def delete_user(user_id):
         return make_response("", 204)
     except Exception:
         return jsonify({"error": "Internal server error"}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TEST & DEBUG ENDPOINTS FOR SMART EXTRACTION
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/test/smart-extraction", methods=["GET"])
+def test_smart_extraction():
+    """
+    GET /api/test/smart-extraction
+    
+    Test the smart extraction functionality with various error formats.
+    Returns results showing how each test case is processed.
+    
+    This demonstrates that the backend can automatically extract stack traces
+    from the error field without requiring project code changes.
+    """
+    test_cases = [
+        {
+            "name": "Python traceback in error field",
+            "description": "Full traceback sent in error field (most common)",
+            "error": """Traceback (most recent call last):
+  File "app/services/user.py", line 42, in get_user
+    result = data['key']
+KeyError: 'user_id'""",
+            "error_detail": None,
+        },
+        {
+            "name": "Error message first, traceback second",
+            "description": "Short error on first line, traceback follows",
+            "error": """KeyError: 'user_id'
+Traceback (most recent call last):
+  File "app/services/user.py", line 42, in get_user
+    result = data['key']""",
+            "error_detail": None,
+        },
+        {
+            "name": "JavaScript stack trace",
+            "description": "JavaScript/TypeScript error format",
+            "error": """TypeError: Cannot read property 'id' of undefined
+    at getUserId (services/user.js:42:15)
+    at processRequest (api/handler.js:128:22)
+    at async Server.handleRequest (server.js:89:5)""",
+            "error_detail": None,
+        },
+        {
+            "name": "Simple error without traceback",
+            "description": "Plain error message with no stack trace",
+            "error": "Connection timeout",
+            "error_detail": None,
+        },
+        {
+            "name": "Already properly separated",
+            "description": "Error and error_detail correctly split",
+            "error": "KeyError: 'user_id'",
+            "error_detail": """Traceback (most recent call last):
+  File "app/services/user.py", line 42, in get_user
+    result = data['key']
+KeyError: 'user_id'""",
+        },
+    ]
+    
+    results = []
+    for test_case in test_cases:
+        # Simulate the extraction logic
+        error = test_case["error"]
+        error_detail = test_case["error_detail"]
+        
+        if not error_detail:
+            short_error, extracted_trace = _smart_extract_error_detail(error)
+            extracted = bool(extracted_trace)
+            final_error = short_error if extracted_trace else error
+            final_error_detail = extracted_trace
+        else:
+            extracted = False
+            final_error = error
+            final_error_detail = error_detail
+        
+        results.append({
+            "test_case": test_case["name"],
+            "description": test_case["description"],
+            "input": {
+                "error": test_case["error"],
+                "error_detail": test_case["error_detail"],
+            },
+            "output": {
+                "error": final_error,
+                "error_detail": final_error_detail,
+                "extraction_performed": extracted,
+                "error_detail_length": len(final_error_detail) if final_error_detail else 0,
+            },
+            "status": "✅ Extracted" if extracted else ("✅ Already separated" if error_detail else "⚠️ No trace found"),
+        })
+    
+    return jsonify({
+        "test_name": "Smart Stack Trace Extraction",
+        "description": "Tests automatic extraction of stack traces from error field",
+        "backend_version": "smart-extraction-v1",
+        "parser_available": STACKTRACE_PARSER_AVAILABLE,
+        "test_cases": len(test_cases),
+        "results": results,
+        "usage": {
+            "endpoint": "POST /api/ingest/error",
+            "automatic": "Backend automatically extracts stack traces when error_detail is NULL",
+            "no_changes_needed": "Project root files don't need to be modified",
+        },
+    })
+
+
+@app.route("/api/test/ingestion", methods=["POST"])
+def test_ingestion():
+    """
+    POST /api/test/ingestion
+    
+    Test the complete ingestion flow including smart extraction.
+    This creates a test project and sends a test error to verify the pipeline.
+    
+    Body: {
+      "test_type": "python"|"javascript"|"simple"|"separated" (optional)
+    }
+    
+    Returns the ingestion result plus extraction diagnostics.
+    """
+    body = request.get_json() or {}
+    test_type = body.get("test_type", "python")
+    
+    # Test data for different scenarios
+    test_data = {
+        "python": {
+            "project_name": "TestProject_Python",
+            "error": """Traceback (most recent call last):
+  File "app/services/user.py", line 42, in get_user
+    result = data['key']
+KeyError: 'user_id'""",
+            "file_name": "app/main.py",
+        },
+        "javascript": {
+            "project_name": "TestProject_JavaScript",
+            "error": """TypeError: Cannot read property 'id' of undefined
+    at getUserId (services/user.js:42:15)
+    at processRequest (api/handler.js:128:22)""",
+            "file_name": "services/user.js",
+        },
+        "simple": {
+            "project_name": "TestProject_Simple",
+            "error": "Connection timeout",
+            "file_name": "app/network.py",
+        },
+        "separated": {
+            "project_name": "TestProject_Separated",
+            "error": "KeyError: 'user_id'",
+            "error_detail": """Traceback (most recent call last):
+  File "app/services/user.py", line 42, in get_user
+    result = data['key']
+KeyError: 'user_id'""",
+            "file_name": "app/main.py",
+        },
+    }
+    
+    if test_type not in test_data:
+        return jsonify({
+            "error": "Invalid test_type",
+            "valid_types": list(test_data.keys()),
+        }), 400
+    
+    payload = test_data[test_type]
+    
+    # Process through ingestion logic
+    project_name = payload["project_name"]
+    error = payload["error"]
+    error_detail_input = payload.get("error_detail")
+    
+    actual_name = _validate_project(project_name)
+    
+    # Smart extraction
+    error_detail = error_detail_input
+    extracted = False
+    if not error_detail:
+        short_error, extracted_trace = _smart_extract_error_detail(error)
+        if extracted_trace:
+            error_detail = extracted_trace
+            error = short_error
+            extracted = True
+    
+    error_hash = derive_error_hash(error, error_detail)
+    
+    # Insert the test error
+    try:
+        inserted = _insert_result(
+            actual_name, payload.get("file_name"),
+            error, error_detail,
+            error_hash, "open",
+            0, 1,
+            None, None, None, None, None, None,
+        )
+        
+        return jsonify({
+            "success": True,
+            "test_type": test_type,
+            "extraction_performed": extracted,
+            "input": {
+                "error": payload["error"],
+                "error_detail": error_detail_input,
+            },
+            "stored": {
+                "error": error,
+                "error_detail": error_detail,
+                "error_detail_length": len(error_detail) if error_detail else 0,
+                "error_hash": error_hash,
+            },
+            "record": serialize_row(inserted),
+            "next_steps": [
+                f"View error at: GET /api/breaks/detail/{error_hash}?project_name={project_name}",
+                "Open Error Details page in frontend to see parsed stack trace",
+            ],
+        }), 201
+        
+    except Exception as e:
+        return jsonify({
+            "error": "Ingestion failed",
+            "detail": str(e),
+            "test_type": test_type,
+        }), 500
+
+
+@app.route("/api/test/parser", methods=["POST"])
+def test_parser():
+    """
+    POST /api/test/parser
+    
+    Test the stack trace parser directly without storing to database.
+    
+    Body: {
+      "error": "KeyError: 'user_id'",
+      "error_detail": "Traceback (most recent call last):\n  File..."
+    }
+    
+    Returns parsed stack trace with extracted frames.
+    """
+    if not STACKTRACE_PARSER_AVAILABLE:
+        return jsonify({
+            "error": "Stack trace parser not available",
+            "parser_available": False,
+        }), 503
+    
+    body = request.get_json() or {}
+    error = body.get("error", "")
+    error_detail = body.get("error_detail", "")
+    
+    if not error:
+        return jsonify({"error": "error field is required"}), 400
+    
+    # Test smart extraction if error_detail is missing
+    extraction_performed = False
+    if not error_detail:
+        short_error, extracted_trace = _smart_extract_error_detail(error)
+        if extracted_trace:
+            error_detail = extracted_trace
+            error = short_error
+            extraction_performed = True
+    
+    if not error_detail:
+        return jsonify({
+            "error": "No stack trace found",
+            "message": "error_detail is NULL and no stack trace detected in error field",
+            "extraction_performed": False,
+        }), 400
+    
+    try:
+        parsed = parse_and_enhance_stacktrace(
+            error,
+            error_detail,
+            enhance_with_source=True,
+        )
+        
+        return jsonify({
+            "success": True,
+            "extraction_performed": extraction_performed,
+            "input": {
+                "error": error,
+                "error_detail": error_detail,
+                "error_detail_length": len(error_detail),
+            },
+            "parsed_stacktrace": parsed,
+            "frame_count": len(parsed.get("frames", [])),
+            "top_frame": parsed.get("frames", [None])[0] if parsed.get("frames") else None,
+        })
+        
+    except Exception as e:
+        import traceback as _tb
+        return jsonify({
+            "error": "Parser failed",
+            "detail": str(e),
+            "traceback": _tb.format_exc(),
+            "input": {
+                "error": error,
+                "error_detail": error_detail[:200] + "..." if len(error_detail) > 200 else error_detail,
+            },
+        }), 500

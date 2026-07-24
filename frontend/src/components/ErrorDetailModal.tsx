@@ -330,7 +330,7 @@ export function ErrorDetailModal({
     setKbOffset(0);
     setKbTotal(0);
     loadKbPage(0, data);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data?.error_message, data?.error_status]);
 
   /**
@@ -770,7 +770,174 @@ export function ErrorDetailModal({
           <div>
             <div style={sectionLabel}>📋 Stack Trace</div>
             {data?.parsed_stacktrace && data.parsed_stacktrace.frames && data.parsed_stacktrace.frames.length > 0 ? (
-              <ParsedStackTraceView parsedTrace={data.parsed_stacktrace} />
+              <div>
+                {/* Top Frame - Exact Error Location */}
+                <div style={{
+                  padding: '18px 20px', borderRadius: 12,
+                  background: 'rgba(239,68,68,0.08)', border: '3px solid rgba(239,68,68,0.3)',
+                  boxShadow: '0 4px 12px rgba(239,68,68,0.15)',
+                  marginBottom: 16,
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
+                    <span style={{ fontSize: 20 }}>💥</span>
+                    <div>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: '#f87171', textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                        Code Line That Caused the Error
+                      </div>
+                      <div style={{ fontSize: 11, color: 'rgba(248,113,113,0.7)', marginTop: 2 }}>
+                        The exact line where the error originated
+                      </div>
+                    </div>
+                  </div>
+
+                  {(() => {
+                    const topFrame = data.parsed_stacktrace.frames[0];
+                    return (
+                      <>
+                        {/* File location header */}
+                        <div style={{
+                          padding: '12px 16px',
+                          background: 'rgba(239,68,68,0.15)',
+                          borderRadius: 8,
+                          border: '1px solid rgba(239,68,68,0.25)',
+                          marginBottom: 12,
+                        }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', fontSize: 12 }}>
+                            <span style={{ fontSize: 16 }}>📂</span>
+                            <span style={{ color: '#fca5a5', fontWeight: 700, fontFamily: 'ui-monospace, monospace' }}>
+                              {topFrame.file_path}
+                            </span>
+                            <span style={{ color: 'rgba(252,165,165,0.5)' }}>:</span>
+                            <span style={{
+                              color: '#fbbf24',
+                              fontWeight: 700,
+                              background: 'rgba(251,191,36,0.2)',
+                              padding: '3px 10px',
+                              borderRadius: 5,
+                              border: '1px solid rgba(251,191,36,0.3)',
+                            }}>
+                              line {topFrame.line_number}
+                            </span>
+                            {topFrame.function_name && (
+                              <>
+                                <span style={{ color: 'rgba(252,165,165,0.5)' }}>in</span>
+                                <span style={{
+                                  color: '#818cf8',
+                                  fontWeight: 700,
+                                  background: 'rgba(129,140,248,0.15)',
+                                  padding: '3px 10px',
+                                  borderRadius: 5,
+                                  border: '1px solid rgba(129,140,248,0.3)',
+                                }}>
+                                  {topFrame.function_name}()
+                                </span>
+                              </>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* The problematic code line */}
+                        {topFrame.code_line ? (
+                          <div style={{
+                            background: 'rgba(0,0,0,0.5)',
+                            borderRadius: 8,
+                            padding: '14px',
+                            border: '2px solid rgba(239,68,68,0.3)',
+                          }}>
+                            <div style={{
+                              fontFamily: 'ui-monospace, Cascadia Code, Consolas, monospace',
+                              fontSize: 13,
+                              lineHeight: 1.6,
+                              color: '#fef3c7',
+                              whiteSpace: 'pre',
+                              overflowX: 'auto',
+                            }}>
+                              {topFrame.code_line}
+                            </div>
+                          </div>
+                        ) : (
+                          <div style={{
+                            padding: '12px',
+                            background: 'rgba(0,0,0,0.3)',
+                            borderRadius: 8,
+                            fontSize: 12,
+                            color: 'rgba(252,165,165,0.7)',
+                          }}>
+                            Code line not available
+                          </div>
+                        )}
+                      </>
+                    );
+                  })()}
+                </div>
+
+                {/* Full Stack Trace */}
+                <div style={{
+                  background: 'rgba(239,68,68,0.06)',
+                  border: '1px solid rgba(239,68,68,0.15)',
+                  borderRadius: 8,
+                  padding: '14px 18px',
+                }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: '#fca5a5', marginBottom: 12 }}>
+                    Full Call Stack ({data.parsed_stacktrace.frames.length} {data.parsed_stacktrace.frames.length === 1 ? 'frame' : 'frames'}):
+                  </div>
+                  {data.parsed_stacktrace.frames.map((frame, idx) => (
+                    <div
+                      key={idx}
+                      style={{
+                        padding: '10px 12px',
+                        marginBottom: 8,
+                        background: idx === 0 ? 'rgba(239,68,68,0.12)' : 'rgba(0,0,0,0.2)',
+                        border: idx === 0 ? '1px solid rgba(239,68,68,0.3)' : '1px solid rgba(255,255,255,0.05)',
+                        borderRadius: 6,
+                      }}
+                    >
+                      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                        <span style={{
+                          fontSize: 11,
+                          fontWeight: 700,
+                          color: idx === 0 ? '#fbbf24' : 'rgba(252,165,165,0.5)',
+                          minWidth: 24,
+                        }}>
+                          #{idx + 1}
+                        </span>
+                        <span style={{
+                          fontFamily: 'ui-monospace, monospace',
+                          fontSize: 12,
+                          color: '#fca5a5',
+                          fontWeight: idx === 0 ? 700 : 400,
+                        }}>
+                          {frame.file_path}:{frame.line_number}
+                        </span>
+                        {frame.function_name && (
+                          <span style={{
+                            fontSize: 12,
+                            color: '#818cf8',
+                            fontFamily: 'ui-monospace, monospace',
+                          }}>
+                            in {frame.function_name}()
+                          </span>
+                        )}
+                      </div>
+                      {frame.code_line && idx < 5 && (
+                        <div style={{
+                          marginTop: 8,
+                          padding: '8px 10px',
+                          background: 'rgba(0,0,0,0.3)',
+                          borderRadius: 4,
+                          fontFamily: 'ui-monospace, monospace',
+                          fontSize: 11,
+                          color: 'rgba(254,243,199,0.9)',
+                          whiteSpace: 'pre',
+                          overflowX: 'auto',
+                        }}>
+                          {frame.code_line}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
             ) : (
               <pre style={{
                 margin: 0, fontFamily: 'ui-monospace, monospace', fontSize: 12,
